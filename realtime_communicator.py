@@ -66,9 +66,14 @@ audio_queue = queue.Queue()
 conversation_log = []
 
 # === セッション管理の初期化 ===
-session_manager = SessionManager(time_threshold_sec=90)
+session_manager = SessionManager()
 
 recording_enabled = True
+
+# テキスト結合用の変数
+buffer_speaker = None
+buffer_text = ""
+buffer_time = None
 
 
 # recording_enabledをスタートボタン押したらTrue、ストップボタン押したらFalseにする
@@ -263,6 +268,7 @@ def process_audio():
     音声処理スレッド
     音声がキューに追加されるたびに、話者分離と文字起こしを実行
     """
+    global buffer_speaker, buffer_text, buffer_time
     while True:
         frames = audio_queue.get()
         if not frames:
@@ -292,7 +298,7 @@ def process_audio():
             if prev_speaker == speaker:
                 combined_audio_list.append(segment_waveform.numpy())
             else:
-                # 🔹 話者が変わったら、直前の話者の音声を処理
+                # 🔹 話者が変わったら、直前の話者の音声を処理。1人の場合は入らない
                 if combined_audio_list:
                     combined_waveform = np.concatenate(combined_audio_list, axis=1)
                     sf.write(current_audio, combined_waveform.T, sample_rate, format="WAV")
@@ -315,17 +321,26 @@ def process_audio():
                             print(f"⚠️ 話者識別結果が日本語ではありません: {transcript.text}")
                             continue
                         print(f"[{recognized_speaker}] {transcript.text}")
-                        send_conversation(recognized_speaker, transcript.text)  # 発話ログをブラウザへ送信
                         timestamp = datetime.now()
-                        # SessionManagerに発話ログとして追加
-                        log_data = {
-                            "time": timestamp,
-                            "speaker": recognized_speaker,
-                            "utterance": transcript.text
-                        }
-                        session_manager.add_utterance(log_data)
-                        log_line = f"[{timestamp.strftime('%Y-%m-%d %H:%M:%S')}] [{recognized_speaker}] {transcript.text}"
-                        conversation_log.append(log_line)
+                        # 音声認識後に、一つ前と話者が同じなら結合して、発話数をカウント
+                        if buffer_speaker == recognized_speaker:
+                            # 同一話者なら追記
+                            buffer_text += " " + transcript.text
+                        else:
+                            # 話者が変わったら、まず前のバッファをフラッシュ
+                            if buffer_speaker is not None:
+                                send_conversation(buffer_speaker, buffer_text)  # 発話ログをブラウザへ送信
+                                session_manager.add_utterance_count({
+                                    "time": buffer_time,
+                                    "speaker": buffer_speaker,
+                                    "utterance": buffer_text
+                                })
+                                log_line = f"[{buffer_time.strftime('%Y-%m-%d %H:%M:%S')}] [{buffer_speaker}] {buffer_text}"
+                                conversation_log.append(log_line)
+                            # 新しいバッファを開始
+                            buffer_speaker = recognized_speaker
+                            buffer_text = transcript.text
+                            buffer_time = timestamp
 
                 # 🔹 新しい話者のためにリセット
                 combined_audio_list = [segment_waveform.numpy()]
@@ -356,17 +371,29 @@ def process_audio():
                     print(f"⚠️ 話者識別結果が日本語ではありません: {transcript.text}")
                     continue
                 print(f"[{recognized_speaker}] {transcript.text}")
-                send_conversation(recognized_speaker, transcript.text)  # 発話ログをブラウザへ送信
                 timestamp = datetime.now()
-                # SessionManagerに発話ログとして追加
-                log_data = {
-                    "time": timestamp,
-                    "speaker": recognized_speaker,
-                    "utterance": transcript.text
-                }
-                session_manager.add_utterance(log_data)
-                log_line = f"[{timestamp.strftime('%Y-%m-%d %H:%M:%S')}] [{recognized_speaker}] {transcript.text}"
-                conversation_log.append(log_line)
+                # 音声認識後に、一つ前と話者が同じなら結合して、発話数をカウント
+                if buffer_speaker == recognized_speaker:
+                    print("同一話者の発話を検出")
+                    # 同一話者なら追記
+                    buffer_text += " " + transcript.text
+                else:
+                    # 話者が変わったら、まず前のバッファをフラッシュ
+                    if buffer_speaker is not None:
+                        print(f"フラッシュ: {buffer_speaker} - {buffer_text}")
+                        send_conversation(buffer_speaker, buffer_text)  # 発話ログをブラウザへ送信
+                        session_manager.add_utterance_count({
+                            "time": buffer_time,
+                            "speaker": buffer_speaker,
+                            "utterance": buffer_text
+                        })
+                        log_line = f"[{buffer_time.strftime('%Y-%m-%d %H:%M:%S')}] [{buffer_speaker}] {buffer_text}"
+                        conversation_log.append(log_line)
+                    # 新しいバッファを開始
+                    print(f"新しいバッファを開始: {recognized_speaker}")
+                    buffer_speaker = recognized_speaker
+                    buffer_text = transcript.text
+                    buffer_time = timestamp
 
 
 def process_audio_batch():
@@ -536,8 +563,8 @@ if __name__ == "__main__":
     # while True:
     #     record_and_transcribe()
     threading.Thread(target=record_audio, daemon=True).start()
-    # threading.Thread(target=process_audio, daemon=True).start()
-    threading.Thread(target=process_audio_batch, daemon=True).start()
+    threading.Thread(target=process_audio, daemon=True).start()
+    # threading.Thread(target=process_audio_batch, daemon=True).start()
 
     try:
         while True:

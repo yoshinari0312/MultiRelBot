@@ -17,11 +17,12 @@ class SessionManager:
     セッションが確定したらQueueに送ることで、後段の分析処理と非同期に連携できる。
     """
 
-    def __init__(self, time_threshold_sec=90):
+    def __init__(self, time_threshold_sec=90, utterances_per_session: int = 10):
         """
         :param time_threshold_sec: 発話間の時間差がこの秒数を超えるとセッションが切り替わる
         """
         self.time_threshold_sec = time_threshold_sec
+        self.utterances_per_session = utterances_per_session
         self.lock = threading.Lock()  # スレッドセーフに処理するためのロック
         self.current_session = []     # 現在進行中のセッション
         self.history = []             # 現在のセッションの発話履歴（話題判定に使う）
@@ -35,6 +36,22 @@ class SessionManager:
         self.batch_queue = queue.Queue()
         self.batch_thread = threading.Thread(target=self._batch_worker, daemon=True)
         self.batch_thread.start()
+
+    def add_utterance_count(self, log: Dict):
+        """
+        固定発話数でセッションを切るメソッド。
+        呼ばれるたびに current_session に追加し、
+        utterances_per_session 件たまったらセッション確定 → analyzer.update → クリア。
+        """
+        with self.lock:
+            self.current_session.append(log)
+            # 10発話たまったら切り替え
+            if len(self.current_session) >= self.utterances_per_session:
+                # セッション確定
+                self.analyzer.update(self.current_session)
+                print(f"セッション確定（{self.utterances_per_session}発話到達）")
+                # クリアして次セッションへ
+                self.current_session = []
 
     def add_utterance(self, log):
         """
