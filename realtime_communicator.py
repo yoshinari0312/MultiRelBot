@@ -401,6 +401,7 @@ def process_audio_batch():
     音声処理スレッド
     音声がキューに追加されるたびに、話者分離と文字起こしを実行
     """
+    global buffer_speaker, buffer_text, buffer_time
     utterance_buffer = []
     while True:
         frames = audio_queue.get()
@@ -454,16 +455,26 @@ def process_audio_batch():
                             print(f"⚠️ 話者識別結果が日本語ではありません: {transcript.text}")
                             continue
                         print(f"[{recognized_speaker}] {transcript.text}")
-                        send_conversation(recognized_speaker, transcript.text)  # 発話ログをブラウザへ送信
                         timestamp = datetime.now()
-                        # SessionManagerに発話ログとして追加
-                        log_data = {
-                            "time": timestamp,
-                            "speaker": recognized_speaker,
-                            "utterance": transcript.text
-                        }
-                        # バッファに溜める
-                        utterance_buffer.append(log_data)
+                        # 音声認識後に、一つ前と話者が同じなら結合して、発話数をカウント
+                        if buffer_speaker == recognized_speaker:
+                            # 同一話者なら追記
+                            buffer_text += " " + transcript.text
+                        else:
+                            # 話者が変わったら、まず前のバッファをフラッシュ
+                            if buffer_speaker is not None:
+                                send_conversation(buffer_speaker, buffer_text)  # 発話ログをブラウザへ送信
+                                utterance_buffer.append({
+                                    "time": buffer_time,
+                                    "speaker": buffer_speaker,
+                                    "utterance": buffer_text
+                                })
+                                log_line = f"[{buffer_time.strftime('%Y-%m-%d %H:%M:%S')}] [{buffer_speaker}] {buffer_text}"
+                                conversation_log.append(log_line)
+                            # 新しいバッファを開始
+                            buffer_speaker = recognized_speaker
+                            buffer_text = transcript.text
+                            buffer_time = timestamp
                         # N_BATCHたまったら非同期キューへ投入
                         if len(utterance_buffer) >= N_BATCH:
                             session_manager.batch_queue.put(utterance_buffer.copy())
@@ -500,16 +511,26 @@ def process_audio_batch():
                     print(f"⚠️ 話者識別結果が日本語ではありません: {transcript.text}")
                     continue
                 print(f"[{recognized_speaker}] {transcript.text}")
-                send_conversation(recognized_speaker, transcript.text)  # 発話ログをブラウザへ送信
                 timestamp = datetime.now()
-                # SessionManagerに発話ログとして追加
-                log_data = {
-                    "time": timestamp,
-                    "speaker": recognized_speaker,
-                    "utterance": transcript.text
-                }
-                # バッファに溜める
-                utterance_buffer.append(log_data)
+                # 音声認識後に、一つ前と話者が同じなら結合して、発話数をカウント
+                if buffer_speaker == recognized_speaker:
+                    # 同一話者なら追記
+                    buffer_text += " " + transcript.text
+                else:
+                    # 話者が変わったら、まず前のバッファをフラッシュ
+                    if buffer_speaker is not None:
+                        send_conversation(buffer_speaker, buffer_text)  # 発話ログをブラウザへ送信
+                        utterance_buffer.append({
+                            "time": buffer_time,
+                            "speaker": buffer_speaker,
+                            "utterance": buffer_text
+                        })
+                        log_line = f"[{buffer_time.strftime('%Y-%m-%d %H:%M:%S')}] [{buffer_speaker}] {buffer_text}"
+                        conversation_log.append(log_line)
+                    # 新しいバッファを開始
+                    buffer_speaker = recognized_speaker
+                    buffer_text = transcript.text
+                    buffer_time = timestamp
                 # N_BATCHたまったら非同期キューへ投入
                 if len(utterance_buffer) >= N_BATCH:
                     session_manager.batch_queue.put(utterance_buffer.copy())
