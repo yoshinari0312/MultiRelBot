@@ -17,7 +17,7 @@ import socket
 from intervention_planner import InterventionPlanner
 from datetime import datetime
 
-pepper_ip = "192.168.11.24"  # PepperのIPアドレス
+pepper_ip = "192.168.11.48"  # PepperのIPアドレス
 pepper_port = 2002  # Android アプリのポート
 use_robot = True  # Pepperを使用するかどうか
 robot_included = False  # ロボットを関係性学習に組み込むかどうか
@@ -81,6 +81,7 @@ class CommunityAnalyzer:
 
     def update(self, session):
         self.task_queue.put(session)
+        # print(f"関係性推定開始：{datetime.now()}")
 
     # === セッションごと関係性を更新 ===
     def _analyze(self, session_logs):
@@ -127,6 +128,8 @@ class CommunityAnalyzer:
 
         if socketio_cli.connected:
             socketio_cli.emit("graph_updated")  # === グラフ更新通知をWebに送信 ===
+
+        # print(f"関係性推定終了：{datetime.now()}")
 
         if "ロボット" not in participants:
             # ロボット介入戦略の実行
@@ -200,6 +203,7 @@ class CommunityAnalyzer:
         """
         関係性グラフ・三角形構造をもとに、介入戦略を自動生成して実行する
         """
+        # print(f"ロボット介入開始：{datetime.now()}")
         planner = InterventionPlanner(graph=self._build_graph_object(), triangle_scores=self._compute_triangle_scores())
         plan = planner.plan_intervention()
 
@@ -232,6 +236,8 @@ class CommunityAnalyzer:
         if use_robot:
             # --- Pepperに喋らせる（非同期） ---
             send_to_pepper_async(utterance)
+
+        # print(f"ロボット介入終了：{datetime.now()}")
 
         if robot_included:
             # 🔁 ロボットの発話も関係性学習に反映させる

@@ -17,7 +17,7 @@ class SessionManager:
     セッションが確定したらQueueに送ることで、後段の分析処理と非同期に連携できる。
     """
 
-    def __init__(self, time_threshold_sec=90, utterances_per_session: int = 10):
+    def __init__(self, time_threshold_sec=90, utterances_per_session: int = 5):
         """
         :param time_threshold_sec: 発話間の時間差がこの秒数を超えるとセッションが切り替わる
         """

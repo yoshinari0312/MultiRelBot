@@ -20,6 +20,7 @@ import soundfile as sf
 from datetime import datetime
 from session_manager import SessionManager
 import socketio
+
 socketio_cli = socketio.Client()
 
 load_dotenv()
@@ -30,9 +31,10 @@ login(token=os.getenv("HUGGINGFACE_TOKEN"))
 # 話者識別モデルのロード
 diarization_pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=os.getenv("HUGGINGFACE_TOKEN"))
 
-# 必要なら GPU を使用
-if torch.cuda.is_available():
-    diarization_pipeline.to(torch.device("cuda"))
+# GPU を使用できるなら使用
+device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
+print(f"Using device: {device}, GPUを使うか? {torch.backends.mps.is_available()}")
+diarization_pipeline.to(device)
 
 embedding_model = SpeakerRecognition.from_hparams(source="speechbrain/spkrec-ecapa-voxceleb", savedir="tmp")
 
@@ -203,6 +205,7 @@ def identify_speaker(audio_buffer):
 
 def diarize_audio(audio_buffer):
     """話者分離を適用して、話者ごとの音声を分離"""
+    print(f"音声ファイルの話者ごと分離開始{datetime.now()}")
     audio_buffer.seek(0)
     waveform, sample_rate = torchaudio.load(audio_buffer)
     diarization = diarization_pipeline({"waveform": waveform, "sample_rate": sample_rate}, min_speakers=MIN_SPEAKERS, max_speakers=MAX_SPEAKERS)
@@ -214,6 +217,7 @@ def diarize_audio(audio_buffer):
     for turn, _, speaker in diarization.itertracks(yield_label=True):
         speaker_timeline.append((speaker, turn.start, turn.end))
 
+    print(f"音声ファイルの話者ごと分離終了{datetime.now()}")
     return speaker_timeline, waveform, sample_rate
 
 
@@ -274,7 +278,7 @@ def process_audio():
         if not frames:
             continue
 
-        print("音声処理中...")
+        print(f"音声処理開始：{datetime.now()}")
         audio_buffer = BytesIO()
         with wave.open(audio_buffer, "wb") as wf:
             wf.setnchannels(CHANNELS)
@@ -304,12 +308,15 @@ def process_audio():
                     sf.write(current_audio, combined_waveform.T, sample_rate, format="WAV")
                     current_audio.seek(0)
 
+                    print(f"話者識別開始（複数）：{datetime.now()}")
                     recognized_speaker = identify_speaker(current_audio)
+                    print(f"話者識別終了（複数）：{datetime.now()}")
                     if recognized_speaker == "未識別":
                         print("⚠️ 話者が識別できなかったため、文字起こしをスキップします。")
                     elif recognized_speaker == "ロボット":
                         print("🤖 ロボットの発話のため、スキップします。")
                     else:
+                        print(f"音声認識開始（複数）：{datetime.now()}")
                         transcript = client.audio.transcriptions.create(
                             # model="whisper-1",
                             # model="gpt-4o-mini-transcribe",  # 速度重視
@@ -317,10 +324,11 @@ def process_audio():
                             file=("audio_segment.wav", current_audio, "audio/wav"),
                             language="ja"
                         )
+                        print(f"音声認識終了（複数）：{datetime.now()}")
                         if not is_japanese(transcript.text):
                             print(f"⚠️ 話者識別結果が日本語ではありません: {transcript.text}")
                             continue
-                        print(f"[{recognized_speaker}] {transcript.text}")
+                        print(f"🧑[{recognized_speaker}] {transcript.text}")
                         timestamp = datetime.now()
                         # 音声認識後に、一つ前と話者が同じなら結合して、発話数をカウント
                         if buffer_speaker == recognized_speaker:
@@ -354,12 +362,15 @@ def process_audio():
             sf.write(current_audio, combined_waveform.T, sample_rate, format="WAV")
             current_audio.seek(0)
 
+            print(f"話者識別開始（1人）：{datetime.now()}")
             recognized_speaker = identify_speaker(current_audio)
+            print(f"話者識別終了（1人）：{datetime.now()}")
             if recognized_speaker == "未識別":
                 print("⚠️ 話者が識別できなかったため、文字起こしをスキップします。")
             elif recognized_speaker == "ロボット":
                 print("🤖 ロボットの発話のため、スキップします。")
             else:
+                print(f"音声認識開始（1人）：{datetime.now()}")
                 transcript = client.audio.transcriptions.create(
                     # model="whisper-1",
                     # model="gpt-4o-mini-transcribe",  # 速度重視
@@ -367,10 +378,11 @@ def process_audio():
                     file=("audio_segment.wav", current_audio, "audio/wav"),
                     language="ja"
                 )
+                print(f"音声認識終了（1人）：{datetime.now()}")
                 if not is_japanese(transcript.text):
                     print(f"⚠️ 話者識別結果が日本語ではありません: {transcript.text}")
                     continue
-                print(f"[{recognized_speaker}] {transcript.text}")
+                print(f"🧑[{recognized_speaker}] {transcript.text}")
                 timestamp = datetime.now()
                 # 音声認識後に、一つ前と話者が同じなら結合して、発話数をカウント
                 if buffer_speaker == recognized_speaker:
@@ -394,6 +406,7 @@ def process_audio():
                     buffer_speaker = recognized_speaker
                     buffer_text = transcript.text
                     buffer_time = timestamp
+                print(f"音声処理終了：{datetime.now()}")
 
 
 def process_audio_batch():
@@ -545,7 +558,7 @@ def save_conversation_log():
         return
 
     os.makedirs("logs", exist_ok=True)
-    filename = datetime.now().strftime("logs/conversation7.txt")
+    filename = datetime.now().strftime("logs/conversation8.txt")
     with open(filename, "w", encoding="utf-8") as f:
         for line in conversation_log:
             f.write(line + "\n")
@@ -573,14 +586,17 @@ def on_conversation_update(data):
 
 try_connect_socketio()
 if __name__ == "__main__":
-    register_reference_speaker("小野寺", "static/audio/onodera_sample.wav")
+    # register_reference_speaker("小野寺", "static/audio/onodera_sample.wav")
     # register_reference_speaker("今井", "static/audio/imai_sample.wav")
-    register_reference_speaker("佐藤", "static/audio/sato_sample.wav")
-    register_reference_speaker("田中", "static/audio/tanaka_sample.wav")
+    # register_reference_speaker("佐藤", "static/audio/sato_sample.wav")
+    # register_reference_speaker("田中", "static/audio/tanaka_sample.wav")
     register_reference_speaker("ロボット", "static/audio/robot_sample.wav")
     # register_reference_speaker("大場", "static/audio/oba_sample.wav")
     # register_reference_speaker("馬場", "static/audio/hibiki_sample.wav")
     # register_reference_speaker("三宅", "static/audio/serina_sample.wav")
+    register_reference_speaker("けんしん", "static/audio/kenshin_sample.wav")
+    register_reference_speaker("かんた", "static/audio/kanta_sample.wav")
+    register_reference_speaker("けいじろう", "static/audio/keijiro_sample.wav")
     # while True:
     #     record_and_transcribe()
     threading.Thread(target=record_audio, daemon=True).start()
