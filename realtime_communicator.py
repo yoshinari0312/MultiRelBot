@@ -20,13 +20,19 @@ import soundfile as sf
 from datetime import datetime
 from session_manager import SessionManager
 import socketio
+from google.cloud.speech_v2 import SpeechClient
+from google.cloud.speech_v2.types import cloud_speech as cloud_speech_types
+from google.api_core.client_options import ClientOptions
+
+load_dotenv()
 
 socketio_cli = socketio.Client()
 
-load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # Hugging Face にログイン
 login(token=os.getenv("HUGGINGFACE_TOKEN"))
+# Google Cloud Speech-to-Text のプロジェクトID
+PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT")
 
 # 話者識別モデルのロード
 diarization_pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=os.getenv("HUGGINGFACE_TOKEN"))
@@ -54,6 +60,7 @@ MAX_SPEAKERS = 4  # 最大の話者数
 SIMILARITY_THRESHOLD = -10  # 既存の話者との類似度の閾値
 N_BATCH = 5  # セッション分割判定のバッチサイズ
 ROBOT_UTTERANCE_REMAIN = 0  # ロボット発話後にロボット識別を有効にする残り発話数
+USE_GOOGLE_STT = True  # True にすると Google Cloud Speech-to-Text v2 を使う
 
 # 音声アクティビティ検出 (VAD)
 vad = webrtcvad.Vad(VAD_MODE)
@@ -116,6 +123,66 @@ def try_connect_socketio(url="http://localhost:8888", max_retries=10, interval_s
             print(f"⚠️ Socket.IO 接続失敗 (試行 {attempt}/{max_retries}): {e}")
             time.sleep(interval_sec)
     print("❌ Socket.IO に接続できませんでした。Web UI 機能は無効になります。")
+
+
+def transcribe_streaming_v2(stream_file: str) -> cloud_speech_types.StreamingRecognizeResponse:
+    """オーディオファイルストリームから Google Cloud Speech-to-Text API を使用して音声を文字起こし
+    Args:
+        stream_file (str): 文字起こし対象のローカルオーディオファイルへのパス。
+        例: "resources/audio.wav"
+    Returns:
+        list[cloud_speech_types.StreamingRecognizeResponse]:
+        各オーディオセグメントに対応する文字起こし結果を含むオブジェクトのリスト。
+    """
+    # クライアントのインスタンス
+    client = SpeechClient(client_options=ClientOptions(api_endpoint="eu-speech.googleapis.com"))
+
+    # ファイルをバイト列として読み込む
+    with open(stream_file, "rb") as f:
+        audio_content = f.read()
+
+    # 実際には、stream はオーディオデータのチャンクを生成するジェネレータであるべき
+    chunk_length = len(audio_content) // 5
+    stream = [
+        audio_content[start : start + chunk_length]
+        for start in range(0, len(audio_content), chunk_length)
+    ]
+    audio_requests = (
+        cloud_speech_types.StreamingRecognizeRequest(audio=audio) for audio in stream
+    )
+
+    recognition_config = cloud_speech_types.RecognitionConfig(
+        auto_decoding_config=cloud_speech_types.AutoDetectDecodingConfig(),
+        language_codes=["ja-JP"],
+        model="long",
+        features=cloud_speech_types.RecognitionFeatures(
+            # 句読点挿入
+            enable_automatic_punctuation=True,
+        ),
+    )
+    streaming_config = cloud_speech_types.StreamingRecognitionConfig(
+        config=recognition_config
+    )
+    config_request = cloud_speech_types.StreamingRecognizeRequest(
+        recognizer=f"projects/{PROJECT_ID}/locations/eu/recognizers/my-recognizer",
+        streaming_config=streaming_config,
+    )
+
+    def requests(config: cloud_speech_types.RecognitionConfig, audio: list) -> list:
+        yield config
+        yield from audio
+
+    # 音声をテキストに文字起こし
+    responses_iterator = client.streaming_recognize(
+        requests=requests(config_request, audio_requests)
+    )
+    responses = []
+    for response in responses_iterator:
+        responses.append(response)
+        for result in response.results:
+            print(f"Transcript: {result.alternatives[0].transcript}")
+
+    return responses
 
 
 def is_speech(frame, sample_rate):
@@ -308,32 +375,48 @@ def process_audio():
                     sf.write(current_audio, combined_waveform.T, sample_rate, format="WAV")
                     current_audio.seek(0)
 
-                    print(f"話者識別開始（複数）：{datetime.now()}")
+                    # print(f"話者識別開始（複数）：{datetime.now()}")
                     recognized_speaker = identify_speaker(current_audio)
-                    print(f"話者識別終了（複数）：{datetime.now()}")
+                    # print(f"話者識別終了（複数）：{datetime.now()}")
                     if recognized_speaker == "未識別":
                         print("⚠️ 話者が識別できなかったため、文字起こしをスキップします。")
                     elif recognized_speaker == "ロボット":
                         print("🤖 ロボットの発話のため、スキップします。")
                     else:
                         print(f"音声認識開始（複数）：{datetime.now()}")
-                        transcript = client.audio.transcriptions.create(
-                            # model="whisper-1",
-                            # model="gpt-4o-mini-transcribe",  # 速度重視
-                            model="gpt-4o-transcribe",
-                            file=("audio_segment.wav", current_audio, "audio/wav"),
-                            language="ja"
-                        )
+                        if USE_GOOGLE_STT:
+                            # Google Cloud Speech-to-Text v2 を使う
+                            # --- バッファを書き出してファイル化 ---
+                            tmp_path = "audio_segment.wav"
+                            with open(tmp_path, "wb") as wf:
+                                wf.write(current_audio.getbuffer())
+                            responses = transcribe_streaming_v2(tmp_path)
+                            # 各レスポンスの最初の代替候補を取り出して結合
+                            transcript_text = "".join(
+                                res.results[0].alternatives[0].transcript
+                                for res in responses
+                                if res.results
+                            )
+                        else:
+                            # gpt-4o-transcribe を使う
+                            resp = client.audio.transcriptions.create(
+                                # model="whisper-1",
+                                # model="gpt-4o-mini-transcribe",  # 速度重視
+                                model="gpt-4o-transcribe",
+                                file=("audio_segment.wav", current_audio, "audio/wav"),
+                                language="ja"
+                            )
+                            transcript_text = resp.text
                         print(f"音声認識終了（複数）：{datetime.now()}")
-                        if not is_japanese(transcript.text):
-                            print(f"⚠️ 話者識別結果が日本語ではありません: {transcript.text}")
+                        if not is_japanese(transcript_text):
+                            print(f"⚠️ 話者識別結果が日本語ではありません: {transcript_text}")
                             continue
-                        print(f"🧑[{recognized_speaker}] {transcript.text}")
+                        print(f"🧑[{recognized_speaker}] {transcript_text}")
                         timestamp = datetime.now()
                         # 音声認識後に、一つ前と話者が同じなら結合して、発話数をカウント
                         if buffer_speaker == recognized_speaker:
                             # 同一話者なら追記
-                            buffer_text += " " + transcript.text
+                            buffer_text += " " + transcript_text
                         else:
                             # 話者が変わったら、まず前のバッファをフラッシュ
                             if buffer_speaker is not None:
@@ -347,7 +430,7 @@ def process_audio():
                                 conversation_log.append(log_line)
                             # 新しいバッファを開始
                             buffer_speaker = recognized_speaker
-                            buffer_text = transcript.text
+                            buffer_text = transcript_text
                             buffer_time = timestamp
 
                 # 🔹 新しい話者のためにリセット
@@ -362,33 +445,49 @@ def process_audio():
             sf.write(current_audio, combined_waveform.T, sample_rate, format="WAV")
             current_audio.seek(0)
 
-            print(f"話者識別開始（1人）：{datetime.now()}")
+            # print(f"話者識別開始（1人）：{datetime.now()}")
             recognized_speaker = identify_speaker(current_audio)
-            print(f"話者識別終了（1人）：{datetime.now()}")
+            # print(f"話者識別終了（1人）：{datetime.now()}")
             if recognized_speaker == "未識別":
                 print("⚠️ 話者が識別できなかったため、文字起こしをスキップします。")
             elif recognized_speaker == "ロボット":
                 print("🤖 ロボットの発話のため、スキップします。")
             else:
                 print(f"音声認識開始（1人）：{datetime.now()}")
-                transcript = client.audio.transcriptions.create(
-                    # model="whisper-1",
-                    # model="gpt-4o-mini-transcribe",  # 速度重視
-                    model="gpt-4o-transcribe",
-                    file=("audio_segment.wav", current_audio, "audio/wav"),
-                    language="ja"
-                )
+                if USE_GOOGLE_STT:
+                    # Google Cloud Speech-to-Text v2 を使う
+                    # --- バッファを書き出してファイル化 ---
+                    tmp_path = "audio_segment.wav"
+                    with open(tmp_path, "wb") as wf:
+                        wf.write(current_audio.getbuffer())
+                    responses = transcribe_streaming_v2(tmp_path)
+                    # 各レスポンスの最初の代替候補を取り出して結合
+                    transcript_text = "".join(
+                        res.results[0].alternatives[0].transcript
+                        for res in responses
+                        if res.results
+                    )
+                else:
+                    # gpt-4o-transcribe を使う
+                    resp = client.audio.transcriptions.create(
+                        # model="whisper-1",
+                        # model="gpt-4o-mini-transcribe",  # 速度重視
+                        model="gpt-4o-transcribe",
+                        file=("audio_segment.wav", current_audio, "audio/wav"),
+                        language="ja"
+                    )
+                    transcript_text = resp.text
                 print(f"音声認識終了（1人）：{datetime.now()}")
-                if not is_japanese(transcript.text):
-                    print(f"⚠️ 話者識別結果が日本語ではありません: {transcript.text}")
+                if not is_japanese(transcript_text):
+                    print(f"⚠️ 話者識別結果が日本語ではありません: {transcript_text}")
                     continue
-                print(f"🧑[{recognized_speaker}] {transcript.text}")
+                print(f"🧑[{recognized_speaker}] {transcript_text}")
                 timestamp = datetime.now()
                 # 音声認識後に、一つ前と話者が同じなら結合して、発話数をカウント
                 if buffer_speaker == recognized_speaker:
                     print("同一話者の発話を検出")
                     # 同一話者なら追記
-                    buffer_text += " " + transcript.text
+                    buffer_text += " " + transcript_text
                 else:
                     # 話者が変わったら、まず前のバッファをフラッシュ
                     if buffer_speaker is not None:
@@ -404,7 +503,7 @@ def process_audio():
                     # 新しいバッファを開始
                     print(f"新しいバッファを開始: {recognized_speaker}")
                     buffer_speaker = recognized_speaker
-                    buffer_text = transcript.text
+                    buffer_text = transcript_text
                     buffer_time = timestamp
                 print(f"音声処理終了：{datetime.now()}")
 
