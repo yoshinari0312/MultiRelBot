@@ -21,8 +21,10 @@ from datetime import datetime
 from session_manager import SessionManager
 import socketio
 from google.cloud.speech_v2 import SpeechClient
-from google.cloud.speech_v2.types import cloud_speech as cloud_speech_types
+from google.cloud.speech_v2.types import cloud_speech
 from google.api_core.client_options import ClientOptions
+from typing import List
+from google.cloud import speech
 
 load_dotenv()
 
@@ -33,6 +35,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 login(token=os.getenv("HUGGINGFACE_TOKEN"))
 # Google Cloud Speech-to-Text のプロジェクトID
 PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT")
+RECOGNIZER = f"projects/{PROJECT_ID}/locations/eu/recognizers/my-recognizer"
 
 # 話者識別モデルのロード
 diarization_pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=os.getenv("HUGGINGFACE_TOKEN"))
@@ -60,7 +63,9 @@ MAX_SPEAKERS = 4  # 最大の話者数
 SIMILARITY_THRESHOLD = -10  # 既存の話者との類似度の閾値
 N_BATCH = 5  # セッション分割判定のバッチサイズ
 ROBOT_UTTERANCE_REMAIN = 0  # ロボット発話後にロボット識別を有効にする残り発話数
-USE_GOOGLE_STT = True  # True にすると Google Cloud Speech-to-Text v2 を使う
+USE_GOOGLE_STT = "v1"  # "v1": v1の非ストリーミング、"v1-streaming": v1のストリーミング、 "v2-streaming": v2のストリーミング、False: OpenAI
+USE_DIRECT_STREAM = False  # True にするとマイクチャンクを直接STTへ流し込む
+DIARIZATION_THRESHOLD = 5  # 話者分離するかどうかの閾値
 
 # 音声アクティビティ検出 (VAD)
 vad = webrtcvad.Vad(VAD_MODE)
@@ -73,6 +78,9 @@ audio_queue = queue.Queue()
 
 # 会話履歴ログ
 conversation_log = []
+
+stt_requests_queue = queue.Queue()
+stream_buffer: List[bytes] = []
 
 # === セッション管理の初期化 ===
 session_manager = SessionManager()
@@ -125,13 +133,13 @@ def try_connect_socketio(url="http://localhost:8888", max_retries=10, interval_s
     print("❌ Socket.IO に接続できませんでした。Web UI 機能は無効になります。")
 
 
-def transcribe_streaming_v2(stream_file: str) -> cloud_speech_types.StreamingRecognizeResponse:
+def transcribe_streaming_v2(stream_file: str) -> cloud_speech.StreamingRecognizeResponse:
     """オーディオファイルストリームから Google Cloud Speech-to-Text API を使用して音声を文字起こし
     Args:
         stream_file (str): 文字起こし対象のローカルオーディオファイルへのパス。
         例: "resources/audio.wav"
     Returns:
-        list[cloud_speech_types.StreamingRecognizeResponse]:
+        list[cloud_speech.StreamingRecognizeResponse]:
         各オーディオセグメントに対応する文字起こし結果を含むオブジェクトのリスト。
     """
     # クライアントのインスタンス
@@ -141,48 +149,113 @@ def transcribe_streaming_v2(stream_file: str) -> cloud_speech_types.StreamingRec
     with open(stream_file, "rb") as f:
         audio_content = f.read()
 
-    # 実際には、stream はオーディオデータのチャンクを生成するジェネレータであるべき
-    chunk_length = len(audio_content) // 5
+    # ⚠️ v2 の audio chunk は最大 25600 bytes まで
+    MAX_BYTES = 25600
     stream = [
-        audio_content[start : start + chunk_length]
-        for start in range(0, len(audio_content), chunk_length)
+        audio_content[i : i + MAX_BYTES]
+        for i in range(0, len(audio_content), MAX_BYTES)
     ]
+
     audio_requests = (
-        cloud_speech_types.StreamingRecognizeRequest(audio=audio) for audio in stream
+        cloud_speech.StreamingRecognizeRequest(audio=audio) for audio in stream
     )
 
-    recognition_config = cloud_speech_types.RecognitionConfig(
-        auto_decoding_config=cloud_speech_types.AutoDetectDecodingConfig(),
+    recognition_config = cloud_speech.RecognitionConfig(
+        auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
         language_codes=["ja-JP"],
         model="long",
-        features=cloud_speech_types.RecognitionFeatures(
-            # 句読点挿入
-            enable_automatic_punctuation=True,
-        ),
+        features=cloud_speech.RecognitionFeatures(enable_automatic_punctuation=True),  # 句読点挿入
     )
-    streaming_config = cloud_speech_types.StreamingRecognitionConfig(
-        config=recognition_config
-    )
-    config_request = cloud_speech_types.StreamingRecognizeRequest(
-        recognizer=f"projects/{PROJECT_ID}/locations/eu/recognizers/my-recognizer",
+    streaming_config = cloud_speech.StreamingRecognitionConfig(config=recognition_config)
+    config_request = cloud_speech.StreamingRecognizeRequest(
+        recognizer=RECOGNIZER,
         streaming_config=streaming_config,
     )
 
-    def requests(config: cloud_speech_types.RecognitionConfig, audio: list) -> list:
+    def requests(config: cloud_speech.RecognitionConfig, audio: list) -> list:
         yield config
         yield from audio
 
     # 音声をテキストに文字起こし
-    responses_iterator = client.streaming_recognize(
-        requests=requests(config_request, audio_requests)
-    )
+    try:
+        responses_iterator = client.streaming_recognize(
+            requests=requests(config_request, audio_requests)
+        )
+    except Exception as e:
+        print(f"⚠️ Google Cloud Speech-to-Text エラー: {e}")
+        return []
     responses = []
     for response in responses_iterator:
         responses.append(response)
-        for result in response.results:
-            print(f"Transcript: {result.alternatives[0].transcript}")
 
     return responses
+
+
+def transcribe_streaming_v1(stream_file: str) -> list[speech.StreamingRecognizeResponse]:
+    """v1 API でファイルを読み込んでストリーミング認識を行い、StreamingRecognizeResponse のリストを返す"""
+    # クライアントのインスタンス
+    client = speech.SpeechClient()
+
+    # ファイルをバイト列として読み込む
+    with open(stream_file, "rb") as f:
+        audio_content = f.read()
+
+    # v1 では大きすぎるチャンクを避ける程度に約32KBごとに切り出し
+    CHUNK_BYTES = 32000
+    chunks = [
+        audio_content[i : i + CHUNK_BYTES]
+        for i in range(0, len(audio_content), CHUNK_BYTES)
+    ]
+    audio_requests = (
+        speech.StreamingRecognizeRequest(audio_content=chunk)
+        for chunk in chunks
+    )
+
+    config = speech.RecognitionConfig(
+        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+        sample_rate_hertz=SAMPLE_RATE,
+        language_code="ja-JP",
+        enable_automatic_punctuation=True,
+    )
+    streaming_config = speech.StreamingRecognitionConfig(
+        config=config,
+        interim_results=False,
+    )
+
+    # ストリーミング認識ジェネレータ
+    def requests_gen():
+        yield from audio_requests
+
+    # 認識実行＆結果収集
+    responses: list[speech.StreamingRecognizeResponse] = []
+    try:
+        for resp in client.streaming_recognize(streaming_config, requests_gen()):
+            responses.append(resp)
+    except Exception as e:
+        print(f"⚠️ v1 ストリーミング認識エラー: {e}")
+    return responses
+
+
+def transcribe_v1(stream_file: str) -> speech.RecognizeResponse:
+    """オーディオファイルを Google Cloud Speech-to-Text v1 の 非ストリーミング Recognize API で文字起こし"""
+    # クライアントのインスタンス
+    client = speech.SpeechClient()
+
+    # ファイルをバイト列として読み込む
+    with open(stream_file, "rb") as f:
+        content = f.read()
+
+    # 認識設定 (LINEAR16, 16kHz, 日本語)
+    config = speech.RecognitionConfig(
+        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+        sample_rate_hertz=SAMPLE_RATE,
+        language_code="ja-JP",
+        enable_automatic_punctuation=True,
+    )
+    audio = speech.RecognitionAudio(content=content)
+
+    # 非ストリーミング認識を実行して結果を返す
+    return client.recognize(config=config, audio=audio)
 
 
 def is_speech(frame, sample_rate):
@@ -209,7 +282,7 @@ def extract_embedding(audio_input):
 
     # 入力が極端に短い場合は処理をスキップ
     if len(audio_data) < 1600 * 6:  # 約0.6秒未満のデータをスキップ
-        print("⚠️ 音声データが短すぎるため、スキップします。")
+        print("⚠️ 音声データが短い：話者識別スキップ")
         return None
 
     # モデルに入力できる形式に変換
@@ -312,20 +385,28 @@ def record_audio():
                 print("⚠️ 音声データが取得できませんでした。無音として処理します。")
                 data = b"\x00" * CHUNK
 
+            # VAD でほぼ無音なら完全スキップ
+            # if not is_speech(data, SAMPLE_RATE):
+            #     continue
+
             frames.append(data)
 
-            if is_speech(data, SAMPLE_RATE):
-                has_voice = True
-                silence_start_time = None
+            if USE_DIRECT_STREAM:
+                stt_requests_queue.put(data)
+                stream_buffer.append(data)
             else:
-                if silence_start_time is None:
-                    silence_start_time = time.time()
-                elif time.time() - silence_start_time >= SILENCE_DURATION:
-                    if has_voice:
-                        # print("沈黙を検知！音声をキューに追加します...")
-                        audio_queue.put(frames)
-                    frames = []
-                    has_voice = False
+                if is_speech(data, SAMPLE_RATE):
+                    has_voice = True
+                    silence_start_time = None
+                else:
+                    if silence_start_time is None:
+                        silence_start_time = time.time()
+                    elif time.time() - silence_start_time >= SILENCE_DURATION:
+                        if has_voice:
+                            # print("沈黙を検知！音声をキューに追加します...")
+                            audio_queue.put(frames)
+                        frames = []
+                        has_voice = False
     except KeyboardInterrupt:
         print("録音終了")
 
@@ -354,7 +435,24 @@ def process_audio():
             wf.writeframes(b"".join(frames))
         audio_buffer.seek(0)
 
-        speaker_timeline, waveform, sample_rate = diarize_audio(audio_buffer)
+        # ── DIARIZATION_THRESHOLD 秒未満は話者分離せず「1 人」と見なす ──
+        with wave.open(audio_buffer, 'rb') as wf2:
+            nframes = wf2.getnframes()
+            framerate = wf2.getframerate()
+            duration = nframes / framerate
+        audio_buffer.seek(0)
+        if duration >= DIARIZATION_THRESHOLD:
+            speaker_timeline, waveform, sample_rate = diarize_audio(audio_buffer)
+        else:
+            # 短い音声は「1 人」扱い
+            waveform, sample_rate = torchaudio.load(audio_buffer)
+            speaker_timeline = [('single', 0.0, duration)]
+
+        # 音声があるバイト数よりも小さければ、処理を全てスキップ
+        # print(f"音声データのバイト数: {audio_buffer.getbuffer().nbytes}")
+        if audio_buffer.getbuffer().nbytes < 30000:
+            print("⚠️ 音声データが短い：処理を全てスキップ")
+            continue
 
         prev_speaker = None
         combined_audio_list = []
@@ -372,8 +470,14 @@ def process_audio():
                 # 🔹 話者が変わったら、直前の話者の音声を処理。1人の場合は入らない
                 if combined_audio_list:
                     combined_waveform = np.concatenate(combined_audio_list, axis=1)
-                    sf.write(current_audio, combined_waveform.T, sample_rate, format="WAV")
-                    current_audio.seek(0)
+                    try:
+                        sf.write(current_audio, combined_waveform.T, sample_rate, format="WAV")
+                        current_audio.seek(0)
+                    except Exception as e:
+                        print(f"⚠️ WAV 書き込みエラー（複数セグメント）：{e}")
+                        # このセグメントの処理をスキップ
+                        combined_audio_list = []
+                        continue
 
                     # print(f"話者識別開始（複数）：{datetime.now()}")
                     recognized_speaker = identify_speaker(current_audio)
@@ -390,13 +494,23 @@ def process_audio():
                             tmp_path = "audio_segment.wav"
                             with open(tmp_path, "wb") as wf:
                                 wf.write(current_audio.getbuffer())
-                            responses = transcribe_streaming_v2(tmp_path)
-                            # 各レスポンスの最初の代替候補を取り出して結合
-                            transcript_text = "".join(
-                                res.results[0].alternatives[0].transcript
-                                for res in responses
-                                if res.results
-                            )
+                            if USE_GOOGLE_STT == "v2-streaming":
+                                responses = transcribe_streaming_v2(tmp_path)
+                            elif USE_GOOGLE_STT == "v1-streaming":
+                                responses = transcribe_streaming_v1(tmp_path)
+                            elif USE_GOOGLE_STT == "v1":
+                                response = transcribe_v1(tmp_path)
+                                transcript_text = "".join(
+                                    result.alternatives[0].transcript
+                                    for result in response.results
+                                )
+                            if USE_GOOGLE_STT == "v1-streaming" or USE_GOOGLE_STT == "v2-streaming":
+                                # 各レスポンスの最初の代替候補を取り出して結合
+                                transcript_text = "".join(
+                                    res.results[0].alternatives[0].transcript
+                                    for res in responses
+                                    if res.results
+                                )
                         else:
                             # gpt-4o-transcribe を使う
                             resp = client.audio.transcriptions.create(
@@ -442,8 +556,13 @@ def process_audio():
         # 🔹 最後の話者の発話も処理。1人の場合はこっちに入る
         if combined_audio_list:
             combined_waveform = np.concatenate(combined_audio_list, axis=1)
-            sf.write(current_audio, combined_waveform.T, sample_rate, format="WAV")
-            current_audio.seek(0)
+            try:
+                sf.write(current_audio, combined_waveform.T, sample_rate, format="WAV")
+                current_audio.seek(0)
+            except Exception as e:
+                print(f"⚠️ WAV 書き込みエラー（最終セグメント）：{e}")
+                # 最終セグメントだけスキップして終了
+                continue
 
             # print(f"話者識別開始（1人）：{datetime.now()}")
             recognized_speaker = identify_speaker(current_audio)
@@ -460,13 +579,23 @@ def process_audio():
                     tmp_path = "audio_segment.wav"
                     with open(tmp_path, "wb") as wf:
                         wf.write(current_audio.getbuffer())
-                    responses = transcribe_streaming_v2(tmp_path)
-                    # 各レスポンスの最初の代替候補を取り出して結合
-                    transcript_text = "".join(
-                        res.results[0].alternatives[0].transcript
-                        for res in responses
-                        if res.results
-                    )
+                    if USE_GOOGLE_STT == "v2-streaming":
+                        responses = transcribe_streaming_v2(tmp_path)
+                    elif USE_GOOGLE_STT == "v1-streaming":
+                        responses = transcribe_streaming_v1(tmp_path)
+                    elif USE_GOOGLE_STT == "v1":
+                        response = transcribe_v1(tmp_path)
+                        transcript_text = "".join(
+                            result.alternatives[0].transcript
+                            for result in response.results
+                        )
+                    if USE_GOOGLE_STT == "v1-streaming" or USE_GOOGLE_STT == "v2-streaming":
+                        # 各レスポンスの最初の代替候補を取り出して結合
+                        transcript_text = "".join(
+                            res.results[0].alternatives[0].transcript
+                            for res in responses
+                            if res.results
+                        )
                 else:
                     # gpt-4o-transcribe を使う
                     resp = client.audio.transcriptions.create(
@@ -479,7 +608,7 @@ def process_audio():
                     transcript_text = resp.text
                 print(f"音声認識終了（1人）：{datetime.now()}")
                 if not is_japanese(transcript_text):
-                    print(f"⚠️ 話者識別結果が日本語ではありません: {transcript_text}")
+                    print(f"⚠️ 音声認識結果が日本語ではありません: {transcript_text}")
                     continue
                 print(f"🧑[{recognized_speaker}] {transcript_text}")
                 timestamp = datetime.now()
@@ -651,6 +780,179 @@ def process_audio_batch():
                 conversation_log.append(log_line)
 
 
+def pcm_to_wav_bytesio(pcm_bytes: bytes,
+                       sample_rate: int = 16000,
+                       nchannels: int = 1,
+                       sampwidth: int = 2) -> BytesIO:
+    """ヘッダ無し PCM を WAV バイト列に包む"""
+    wav_buf = BytesIO()
+    with wave.open(wav_buf, "wb") as wf:
+        wf.setnchannels(nchannels)
+        wf.setsampwidth(sampwidth)   # 16-bit PCM → 2 byte
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_bytes)
+    wav_buf.seek(0)
+    return wav_buf
+
+
+def streaming_stt_worker1():
+    """マイク入力チャンクを直接 Google STT v1 へ流し込み、is_final ごとに話者分離をトリガー"""
+    client = speech.SpeechClient()       # v1 クライアント
+    # 最初の config リクエスト
+    recog_conf = speech.RecognitionConfig(
+        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+        sample_rate_hertz=SAMPLE_RATE,
+        language_code="ja-JP",
+        enable_automatic_punctuation=True,
+    )
+    streaming_conf = speech.StreamingRecognitionConfig(
+        config=recog_conf,
+        interim_results=True,
+        single_utterance=True,
+    )
+
+    SILENCE_FRAMES = 50
+
+    def requests_gen():
+        silence_cnt = 0
+        while True:
+            chunk = stt_requests_queue.get()
+            if chunk is None:
+                break
+            # --- 無音判定（B: クライアント VAD） ---
+            if not chunk or not is_speech(chunk, SAMPLE_RATE):
+                silence_cnt += 1
+                if silence_cnt >= SILENCE_FRAMES:
+                    break                           # 無音しきい値超え → ストリーム終了
+                chunk = b"\x00" * 320     # 16 kHz × 1ch × 2B × 0.01s
+            else:
+                silence_cnt = 0                     # リセット
+            yield speech.StreamingRecognizeRequest(audio_content=chunk)
+
+    while True:
+        stream_start = time.time()
+        responses = client.streaming_recognize(
+            config=streaming_conf,
+            requests=requests_gen(),
+            timeout=900,
+        )
+        # ストリーミング認識ループ
+        for resp in responses:
+            # A: END_OF_SINGLE_UTTERANCE を確定トリガに
+            if resp.speech_event_type == speech.StreamingRecognizeResponse.SpeechEventType.END_OF_SINGLE_UTTERANCE:
+                if resp.results:
+                    result = resp.results[-1]        # 直近の結果
+                    result.is_final = True           # フラグ擬似的に立てる
+                else:
+                    break                            # 結果なしで終了
+            for result in resp.results:
+                print(result)
+                if result.is_final:
+                    print("is_finalに入りました")
+                    # 確定区間のテキストとタイムスタンプを取得
+                    text = result.alternatives[0].transcript
+                    elapsed = result.result_end_time.total_seconds()
+                    end = stream_start + elapsed
+                    # バッファから確定区間の音声を切り出し
+                    segment = b"".join(stream_buffer)  # バッファ内の音声データを結合
+                    full_buf = pcm_to_wav_bytesio(segment)
+                    # 話者分離＆話者認識
+                    speaker_tl, _, _ = diarize_audio(full_buf)  # 要検討。絶対2人入らないならコメント
+                    speaker = identify_speaker(full_buf)
+                    # ログ＆セッション管理
+                    timestamp = datetime.fromtimestamp(end)
+                    send_conversation(speaker, text)
+                    session_manager.add_utterance({
+                        "time": timestamp,
+                        "speaker": speaker,
+                        "utterance": text
+                    })
+                    print(f"🧑[{speaker}] {text}")
+                    log_line = f"[{timestamp.strftime('%Y-%m-%d %H:%M:%S')}] [{speaker}] {text}"
+                    conversation_log.append(log_line)
+
+                    # 次区間用にバッファクリア
+                    stream_buffer.clear()
+
+
+def streaming_stt_worker2():
+    """マイク入力チャンクを直接 Google STT v2 へ流し込み、is_final ごとに話者分離をトリガー"""
+    client = SpeechClient(client_options=ClientOptions(api_endpoint="eu-speech.googleapis.com"))
+    # 最初の config リクエスト
+    recog_conf = cloud_speech.RecognitionConfig(
+        auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
+        language_codes=["ja-JP"], model="latest_short",
+        features=cloud_speech.RecognitionFeatures(enable_automatic_punctuation=True),
+    )
+    streaming_conf = cloud_speech.StreamingRecognitionConfig(
+        config=recog_conf,
+        # ───── ストリーム維持用の各種フラグ ──────
+        streaming_features=cloud_speech.StreamingRecognitionFeatures(
+            interim_results=True,                  # 部分結果を早めに返す
+            enable_voice_activity_events=True,     # VAD イベントも受信
+            # voice_activity_timeout=cloud_speech.VoiceActivityTimeout(
+            #     start_timeout=duration_pb2.Duration(seconds=5),   # 発話開始待ち
+            #     end_timeout=duration_pb2.Duration(seconds=30),    # 発話後の無音
+            # ),
+        ),
+    )
+
+    def requests_gen():
+        # 初回: 設定 + recognizer を送信
+        yield cloud_speech.StreamingRecognizeRequest(
+            recognizer=RECOGNIZER,
+            streaming_config=streaming_conf,
+        )
+        # ② 以降: 音声 + recognizer
+        while True:
+            # 100 ms（約 10 チャンク）分まとめて送信
+            buf = []
+            try:
+                for _ in range(10):
+                    buf.append(stt_requests_queue.get(timeout=0.02))
+            except queue.Empty:
+                pass
+            chunk = b"".join(buf)
+            if not chunk:                          # 送るものが無ければスキップ
+                continue
+            # 以降のリクエストにも recognizer を含める
+            yield cloud_speech.StreamingRecognizeRequest(
+                audio=chunk,
+            )
+
+    # ストリーミング認識ループ
+    for resp in client.streaming_recognize(requests=requests_gen()):
+        print(f"🔄 音声認識結果を受信: {len(resp.results)} 件")
+        for result in resp.results:
+            print(result)
+            if result.is_final:
+                print("is_finalに入りました")
+                # 確定区間のテキストとタイムスタンプを取得
+                text = result.alternatives[0].transcript
+                int_sec, dec_sec = result.result_end_time.seconds, result.result_end_time.nanos / 1e9
+                end = int_sec + dec_sec
+                # バッファから確定区間の音声を切り出し
+                segment = b"".join(stream_buffer)  # バッファ内の音声データを結合
+                full_buf = BytesIO(segment)
+                # 話者分離＆話者認識
+                speaker_tl, _, _ = diarize_audio(full_buf)  # 要検討。絶対2人入らないならコメント
+                speaker = identify_speaker(full_buf)
+                # ログ＆セッション管理
+                timestamp = datetime.fromtimestamp(end)
+                send_conversation(speaker, text)
+                session_manager.add_utterance({
+                    "time": timestamp,
+                    "speaker": speaker,
+                    "utterance": text
+                })
+                print(f"🧑[{speaker}] {text}")
+                log_line = f"[{timestamp.strftime('%Y-%m-%d %H:%M:%S')}] [{speaker}] {text}"
+                conversation_log.append(log_line)
+
+                # 次区間用にバッファクリア
+                stream_buffer.clear()
+
+
 def save_conversation_log():
     if not conversation_log:
         print("🔕 会話ログは空です。")
@@ -699,8 +1001,11 @@ if __name__ == "__main__":
     # while True:
     #     record_and_transcribe()
     threading.Thread(target=record_audio, daemon=True).start()
-    threading.Thread(target=process_audio, daemon=True).start()
-    # threading.Thread(target=process_audio_batch, daemon=True).start()
+    if USE_DIRECT_STREAM:
+        threading.Thread(target=streaming_stt_worker2, daemon=True).start()  # マイク入力チャンクを直接STTへ流し込
+    else:
+        threading.Thread(target=process_audio, daemon=True).start()  # 0.5秒ごとに音声を処理する
+        # threading.Thread(target=process_audio_batch, daemon=True).start()  # バッチ処理で音声を処理する（会話数ごとにセッション分割判定している場合は使わない）
 
     try:
         while True:
