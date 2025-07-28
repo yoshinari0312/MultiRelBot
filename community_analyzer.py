@@ -63,6 +63,22 @@ def send_to_pepper_async(message: str):
     threading.Thread(target=send_to_pepper, args=(message,), daemon=True).start()
 
 
+# === Pepperの腕を持ち上げるアニメーションを送信 ===
+def perform_arm_lift(self, seconds=2):
+    """Pepperの腕をseconds秒間持ち上げるアニメーション指示を送信"""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect((pepper_ip, pepper_port))
+            # アニメーションコマンド: "anim:<動作名>,<秒数>"
+            s.sendall(f"anim:liftRightArm,{seconds}\n".encode('utf-8'))
+    except Exception as e:
+        print(f"⚠️ Pepperアニメーション送信失敗: {e}")
+
+
+def perform_arm_lift_async(self):
+    threading.Thread(target=self.perform_arm_lift, daemon=True).start()
+
+
 class CommunityAnalyzer:
     def __init__(self, decay_factor=1.5):
         self.scores = defaultdict(float)
@@ -210,6 +226,12 @@ class CommunityAnalyzer:
         if not plan:
             print("🤖 介入対象なし（安定状態）")
             return
+        else:
+            if use_robot:
+                # Pepperの腕を2秒間持ち上げるアニメーション
+                # self.perform_arm_lift_async()
+                # フィラーとして「あのー」を挟む
+                send_to_pepper_async("あのー")
 
         utterance = planner.generate_robot_utterance(plan, session_logs)
 

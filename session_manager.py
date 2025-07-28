@@ -17,14 +17,18 @@ class SessionManager:
     セッションが確定したらQueueに送ることで、後段の分析処理と非同期に連携できる。
     """
 
-    def __init__(self, time_threshold_sec=90, utterances_per_session: int = 5):
+    def __init__(self, time_threshold_sec=90, utterances_per_session: int = 10, analyze_every: int = 5):
         """
         :param time_threshold_sec: 発話間の時間差がこの秒数を超えるとセッションが切り替わる
         """
         self.time_threshold_sec = time_threshold_sec
         self.utterances_per_session = utterances_per_session
+        self.analyze_every = analyze_every
         self.lock = threading.Lock()  # スレッドセーフに処理するためのロック
-        self.current_session = []     # 現在進行中のセッション
+        # 最新10発話を保持するスライディングウィンドウ
+        from collections import deque
+        self.current_session = deque(maxlen=self.utterances_per_session)
+        self.total_utterance_count = 0
         self.history = []             # 現在のセッションの発話履歴（話題判定に使う）
         self.analyzer = CommunityAnalyzer()
 
@@ -41,17 +45,17 @@ class SessionManager:
         """
         固定発話数でセッションを切るメソッド。
         呼ばれるたびに current_session に追加し、
-        utterances_per_session 件たまったらセッション確定 → analyzer.update → クリア。
+        5 発話ごとに analyzer.update(最新10発話) を実行。
         """
         with self.lock:
+            self.total_utterance_count += 1
+            # 最新10発話を保持
             self.current_session.append(log)
-            # 10発話たまったら切り替え
-            if len(self.current_session) >= self.utterances_per_session:
-                # セッション確定
-                self.analyzer.update(self.current_session)
-                print(f"セッション確定（{self.utterances_per_session}発話到達）")
-                # クリアして次セッションへ
-                self.current_session = []
+            # 5 発話ごとに分析
+            if self.total_utterance_count % self.analyze_every == 0:
+                window = list(self.current_session)
+                self.analyzer.update(window)
+                print(f"分析実行（{self.analyze_every}発話ごと）: 最新{len(window)}発話を使用")
 
     def add_utterance(self, log):
         """

@@ -56,33 +56,31 @@ def is_same_topic(history_utterances, current_utterance):
     return "yes" in res.choices[0].message.content.strip().lower()
 
 
-# === セッションの自動分割（時間 + 話題） ===
-def split_sessions(logs, time_threshold_sec=90):
+# === セッションの分割 ===
+def split_sessions(logs):
     sessions = []
-    history = [logs[0]["utterance"]]
-    current_session = [logs[0]]
 
-    for i in range(1, len(logs)):
-        curr = logs[i]
-        time_diff = (curr["time"] - current_session[-1]["time"]).total_seconds()
+    if sys.argv[1] == "1":  # 5, 10, 15, 20, 25, 30
+        ends = [5, 10, 15, 20, 25, 30]
+    elif sys.argv[1] == "2":  # 5, 10, 15, 21, 26, 32
+        ends = [5, 10, 15, 21, 26, 32]
+    elif sys.argv[1] == "3":  # 5, 10, 16, 22, 29, 37
+        ends = [5, 10, 16, 22, 29, 37]
 
-        same_topic = True
-
-        if time_diff > time_threshold_sec:
-            same_topic = False
-        # else:
-        #     # 履歴全体との流れを考慮してGPTで判定
-        #     same_topic = is_same_topic(history, curr["utterance"])
-
-        if same_topic:
-            current_session.append(curr)
-            history.append(curr["utterance"])
+    for i, end in enumerate(ends):
+        # 最初の2セッションは、その終端の発話数をそのままウィンドウサイズに
+        if i < 2:
+            window = end
         else:
-            sessions.append(current_session)
-            current_session = [curr]
-            history = [curr["utterance"]]
-    if current_session:
-        sessions.append(current_session)
+            # 2つ前の終端との差分をウィンドウサイズに
+            window = end - ends[i - 2]
+        start = max(0, end - window)
+        sessions.append(logs[start:end])
+        # 配列を改行で結合してprint
+        # print(f"\n--- セッション {i + 1} ({start}〜{end}) ---")
+        # for log in logs[start:end]:
+        #     print(f"{log['utterance']}")
+
     return sessions
 
 
@@ -153,6 +151,7 @@ def parse_scores_from_response(response_text):
 
 
 # === セッションごとにスコア更新（時間減衰付きEMA） ===
+
 def compute_all_relationship_scores(logs, decay_factor=1.5):
     sessions = split_sessions(logs)
     # print(f"\n📎 総セッション数: {len(sessions)}")
@@ -234,7 +233,7 @@ def compute_unified_scores_per_session(logs):
 
         gpt_scores = get_gpt_friendship_scores(cumulative_logs, participants)
         print(f"📐 セッション {idx} の GPTスコア:")
-        
+
         for (a, b), s in gpt_scores.items():
             print(f"{a} - {b}: {s:.2f}")
 

@@ -115,16 +115,30 @@ class InterventionPlanner:
 
         # Step 2〜4: 不安定三角形に基づく介入
         triangle = self.select_intervention_triangle()
-        if not triangle:
-            return None  # --- も ++-系 もない場合は介入不要
+        if triangle:
+            target_node = self.choose_target_node(triangle)
+            return {
+                "type": "triangle",
+                "structure": self.triangle_scores[triangle][0],
+                "triangle": triangle,
+                "target": target_node
+            }
 
-        target_node = self.choose_target_node(triangle)
-        return {
-            "type": "triangle",
-            "structure": self.triangle_scores[triangle][0],
-            "triangle": triangle,
-            "target": target_node
-        }
+        # Step 5: 安定状態だが弱リンク(0.0～0.2)がある場合 → 関係形成支援介入
+        weak_pairs_scores = []
+        for u, v, data in self.graph.edges(data=True):
+            score = data.get("score", 0.0)
+            if 0.0 <= score <= 0.2:
+                weak_pairs_scores.append(((u, v), score))
+        if weak_pairs_scores:
+            # 最もスコアが小さいペアを1つだけ選択
+            target_pair, _ = min(weak_pairs_scores, key=lambda x: x[1])
+            return {
+                "type": "promotion",
+                "pairs": [target_pair]
+            }
+
+        return None  # 介入なし
 
     def generate_robot_utterance(self, plan: Dict[str, str], session_logs: List[Dict]) -> str:
         """
@@ -203,11 +217,30 @@ class InterventionPlanner:
 """
             else:
                 full_prompt = ""
+
+        elif plan['type'] == 'promotion':
+            # 弱リンクを選んで、一文で関係形成支援を促す
+            a, b = plan['pairs'][0]
+            full_prompt = f"""
+現在の会話履歴（抜粋）：
+{context}
+
+現在、{a}さんと{b}さんの関係は中立的で、やや弱いつながりです。
+あなたは会話をサポートするロボットです。
+{a}さんと{b}さんがより深くつながれるよう、過去の会話を考慮した上で共通点を示したり質問を促したりする一文を考えてください。
+
+例：
+- 「{a}さんと{b}さんは意見は違うけど、〇〇の部分は似ていますね」
+- 「{a}さんと{b}さんの共通点について、もう少し話してみませんか？」
+- 「{a}さんの意見について、{b}さんはどう思いましたか？」
+
+自然な日本語で、1文だけ話しかけてください。必ず対話の流れに沿って発言してください。
+返答の形式はセリフのみで、「ロボット：」などはつけないでください。
+"""
         else:
-            full_prompt = ""
+            return ""
 
         res = client.chat.completions.create(
-            # model="gpt-4o",
             model="gpt-4.1",
             messages=[
                 {"role": "system", "content": "あなたは空気を読みながら適切に発言するロボットです。"},

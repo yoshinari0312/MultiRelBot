@@ -18,7 +18,7 @@ FORMAT = pyaudio.paInt16  # 16-bit PCM
 CHANNELS = 1  # モノラル
 THRESHOLD = 500  # 無音判定の閾値
 SILENCE_DURATION = 2  # 無音が続いたら停止する秒数
-OUTPUT_FILE = "static/audio/keijiro_sample.wav"
+OUTPUT_FILE = "static/audio/nakasou_sample.wav"
 SAVE_AUDIO = True  # 音声ファイルを保存するかどうか
 
 

@@ -66,6 +66,7 @@ ROBOT_UTTERANCE_REMAIN = 0  # ロボット発話後にロボット識別を有�
 USE_GOOGLE_STT = "v1"  # "v1": v1の非ストリーミング、"v1-streaming": v1のストリーミング、 "v2-streaming": v2のストリーミング、False: OpenAI
 USE_DIRECT_STREAM = False  # True にするとマイクチャンクを直接STTへ流し込む
 DIARIZATION_THRESHOLD = 5  # 話者分離するかどうかの閾値
+SKIP_THRESHOLD_BYTES = 30000  # 音声データのバイト数がこの値以下なら処理をスキップ
 
 # 音声アクティビティ検出 (VAD)
 vad = webrtcvad.Vad(VAD_MODE)
@@ -450,7 +451,7 @@ def process_audio():
 
         # 音声があるバイト数よりも小さければ、処理を全てスキップ
         # print(f"音声データのバイト数: {audio_buffer.getbuffer().nbytes}")
-        if audio_buffer.getbuffer().nbytes < 30000:
+        if audio_buffer.getbuffer().nbytes < SKIP_THRESHOLD_BYTES:
             print("⚠️ 音声データが短い：処理を全てスキップ")
             continue
 
@@ -959,7 +960,7 @@ def save_conversation_log():
         return
 
     os.makedirs("logs", exist_ok=True)
-    filename = datetime.now().strftime("logs/conversation8.txt")
+    filename = datetime.now().strftime("logs/conversation9.txt")
     with open(filename, "w", encoding="utf-8") as f:
         for line in conversation_log:
             f.write(line + "\n")
@@ -987,17 +988,20 @@ def on_conversation_update(data):
 
 try_connect_socketio()
 if __name__ == "__main__":
-    # register_reference_speaker("小野寺", "static/audio/onodera_sample.wav")
+    register_reference_speaker("小野寺", "static/audio/onodera_sample.wav")
+    register_reference_speaker("佐藤", "static/audio/sato_sample.wav")
+    register_reference_speaker("田中", "static/audio/tanaka_sample.wav")
     # register_reference_speaker("今井", "static/audio/imai_sample.wav")
-    # register_reference_speaker("佐藤", "static/audio/sato_sample.wav")
-    # register_reference_speaker("田中", "static/audio/tanaka_sample.wav")
     register_reference_speaker("ロボット", "static/audio/robot_sample.wav")
     # register_reference_speaker("大場", "static/audio/oba_sample.wav")
     # register_reference_speaker("馬場", "static/audio/hibiki_sample.wav")
     # register_reference_speaker("三宅", "static/audio/serina_sample.wav")
-    register_reference_speaker("けんしん", "static/audio/kenshin_sample.wav")
-    register_reference_speaker("かんた", "static/audio/kanta_sample.wav")
-    register_reference_speaker("けいじろう", "static/audio/keijiro_sample.wav")
+    # register_reference_speaker("けんしん", "static/audio/kenshin_sample.wav")
+    # register_reference_speaker("かんた", "static/audio/kanta_sample.wav")
+    # register_reference_speaker("けいじろう", "static/audio/keijiro_sample.wav")
+    # register_reference_speaker("ゆうき", "static/audio/yuki_sample.wav")
+    # register_reference_speaker("なかそう", "static/audio/nakasou_sample.wav")
+    # register_reference_speaker("なおき", "static/audio/naoki_sample.wav")
     # while True:
     #     record_and_transcribe()
     threading.Thread(target=record_audio, daemon=True).start()
