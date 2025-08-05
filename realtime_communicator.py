@@ -25,6 +25,8 @@ from google.cloud.speech_v2.types import cloud_speech
 from google.api_core.client_options import ClientOptions
 from typing import List
 from google.cloud import speech
+import sys
+import config
 
 load_dotenv()
 
@@ -92,6 +94,32 @@ recording_enabled = True
 buffer_speaker = None
 buffer_text = ""
 buffer_time = None
+
+# 標準出力・エラーをログファイルにリダイレクト
+original_stdout = sys.stdout
+original_stderr = sys.stderr
+
+# ログファイルを開く
+log_path = os.path.join(config.LOG_ROOT, "terminal.txt")
+terminal_log = open(log_path, "w", encoding="utf-8")
+
+
+# 両方のストリームに書き込む Tee クラス
+class Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
+
+
+sys.stdout = Tee(original_stdout, terminal_log)
+sys.stderr = Tee(original_stderr, terminal_log)
 
 
 # recording_enabledをスタートボタン押したらTrue、ストップボタン押したらFalseにする
@@ -959,8 +987,7 @@ def save_conversation_log():
         print("🔕 会話ログは空です。")
         return
 
-    os.makedirs("logs", exist_ok=True)
-    filename = datetime.now().strftime("logs/conversation9.txt")
+    filename = os.path.join(config.LOG_ROOT, "conversation.txt")
     with open(filename, "w", encoding="utf-8") as f:
         for line in conversation_log:
             f.write(line + "\n")
@@ -988,16 +1015,17 @@ def on_conversation_update(data):
 
 try_connect_socketio()
 if __name__ == "__main__":
-    register_reference_speaker("小野寺", "static/audio/onodera_sample.wav")
-    register_reference_speaker("佐藤", "static/audio/sato_sample.wav")
-    register_reference_speaker("田中", "static/audio/tanaka_sample.wav")
-    # register_reference_speaker("今井", "static/audio/imai_sample.wav")
     register_reference_speaker("ロボット", "static/audio/robot_sample.wav")
+    # register_reference_speaker("小野寺", "static/audio/onodera_sample.wav")
+    # register_reference_speaker("佐藤", "static/audio/sato_sample.wav")
+    # register_reference_speaker("田中", "static/audio/tanaka_sample.wav")
+    # register_reference_speaker("今井", "static/audio/imai_sample.wav")
     # register_reference_speaker("大場", "static/audio/oba_sample.wav")
     # register_reference_speaker("馬場", "static/audio/hibiki_sample.wav")
-    # register_reference_speaker("三宅", "static/audio/serina_sample.wav")
+    register_reference_speaker("三宅", "static/audio/serina_sample.wav")
     # register_reference_speaker("けんしん", "static/audio/kenshin_sample.wav")
-    # register_reference_speaker("かんた", "static/audio/kanta_sample.wav")
+    register_reference_speaker("立川", "static/audio/kanta_sample.wav")
+    register_reference_speaker("松崎", "static/audio/matsuzaki_sample.wav")
     # register_reference_speaker("けいじろう", "static/audio/keijiro_sample.wav")
     # register_reference_speaker("ゆうき", "static/audio/yuki_sample.wav")
     # register_reference_speaker("なかそう", "static/audio/nakasou_sample.wav")

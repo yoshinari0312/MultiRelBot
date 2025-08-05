@@ -2,7 +2,7 @@ from flask import Flask, render_template
 from flask_socketio import SocketIO, emit
 import os
 
-app = Flask(__name__, static_folder="output", template_folder="templates")
+app = Flask(__name__, static_folder="static", template_folder="templates")
 socketio = SocketIO(app, cors_allowed_origins='*')  # CORS を許可（同一 PC 内ブラウザ想定）
 
 GRAPH_PATH = "output/relationship_graph.png"
@@ -25,12 +25,18 @@ def handle_control(data):
 
 
 @socketio.on("graph_updated")     # Python クライアント → サーバへ
-def relay_graph_event():
+def relay_graph_event(data):
     """
     グラフ画像が保存されたら Python クライアントが emit してくる
     ブラウザへリレー → JS 側で <img> の src パラメータを付け替えてリロード
     """
-    emit("refresh_graph", broadcast=True)
+    index = data.get("index")
+    log_root = data.get("log_root")
+    emit(
+        "refresh_graph",
+        {"index": index, "log_root": log_root},
+        broadcast=True
+    )
 
 
 @socketio.on("conversation_update")  # Python クライアント → サーバへ

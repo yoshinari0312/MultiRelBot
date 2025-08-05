@@ -3,13 +3,20 @@ import networkx as nx
 from typing import List, Tuple, Dict, Optional
 from openai import OpenAI
 from dotenv import load_dotenv
+from collections import defaultdict
+from typing import Any
+import random
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 class InterventionPlanner:
-    def __init__(self, graph: nx.Graph, triangle_scores: Dict[Tuple[str, str, str], Tuple[str, float]], isolation_threshold: float = 0.0):
+    # 過去のロボット発話を保存する辞書
+    # キーは (plan_type, target, structure, triangle)、値は List[str]
+    past_utterances: Dict[Tuple[Any, ...], List[str]] = defaultdict(list)
+
+    def __init__(self, graph: nx.Graph, triangle_scores: Dict[Tuple[str, str, str], Tuple[str, float]], isolation_threshold: float = 0.0, mode: str = "proposal"):
         """
         :param graph: NetworkXグラフ。ノードは人物、エッジは関係性スコア（-1〜1）を持つ
         :param triangle_scores: 三角形ごとの構造タイプ（---, ++- など）とスコア平均
@@ -18,6 +25,7 @@ class InterventionPlanner:
         self.graph = graph
         self.triangle_scores = triangle_scores
         self.theta_iso = isolation_threshold
+        self.mode = mode  # "proposal", "few_utterances", "random_target"
 
     def detect_structural_isolation(self) -> Optional[str]:
         """
@@ -101,10 +109,37 @@ class InterventionPlanner:
 
         return triangle[0]
 
-    def plan_intervention(self) -> Optional[Dict[str, str]]:
+    def plan_intervention(self, session_logs: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """
         介入戦略の全体フローを実行し、介入対象ノードとその構造を返す
         """
+
+        # --- 発話量少ない人に声かけ ---
+        if self.mode == "few_utterances" and session_logs:
+            # 各発言者の文字数合計を計算
+            counts = {}
+            for log in session_logs:
+                sp = log["speaker"]
+                counts[sp] = counts.get(sp, 0) + len(log["utterance"])
+            # 発話量をprint
+            print("発話量（文字数）:", counts)
+            target = min(counts, key=counts.get)
+            print(f"🤖 発話量少ない人: {target}さん")
+            return {
+                "type": "few_utterances",
+                "target": target
+            }
+
+        # --- ランダム対象に固定フレーズ ---
+        if self.mode == "random_target" and session_logs:
+            participants = list({log["speaker"] for log in session_logs})
+            target = random.choice(participants)
+            print(f"🤖 ランダム対象: {target}さん")
+            return {
+                "type": "random_target",
+                "target": target
+            }
+
         # Step 1: 孤立検出
         isolated = self.detect_structural_isolation()
         if isolated:
@@ -119,9 +154,9 @@ class InterventionPlanner:
             target_node = self.choose_target_node(triangle)
             return {
                 "type": "triangle",
-                "structure": self.triangle_scores[triangle][0],
-                "triangle": triangle,
-                "target": target_node
+                "structure": self.triangle_scores[triangle][0],  # 例: '---', '++-', '+-+', '-++'
+                "triangle": triangle,  # 例: ('A', 'B', 'C')
+                "target": target_node  # 例: 'A'（ロボットが話しかけるべきノード）
             }
 
         # Step 5: 安定状態だが弱リンク(0.0～0.2)がある場合 → 関係形成支援介入
@@ -149,6 +184,17 @@ class InterventionPlanner:
         """
         context = "\n".join([f"[{log['speaker']}] {log['utterance']}" for log in session_logs])  # 会話履歴をテキスト化
         # print(f"🤖 会話履歴:\n{context}\n")
+
+        # キーを作成（介入タイプ／対象／構造／三角形）
+        if plan["type"] == "triangle":
+            key = ("triangle", plan["target"], plan["structure"], tuple(plan["triangle"]))
+        elif plan["type"] == "promotion":
+            key = ("promotion", plan["pairs"][0])
+        else:  # isolation
+            key = ("isolation", plan["target"])
+
+        # 過去の発話をチェック
+        history = self.past_utterances.get(key, [])
 
         if plan['type'] == 'isolation':
             print(f"🤖 孤立検出: {plan['target']}さん")
@@ -237,8 +283,35 @@ class InterventionPlanner:
 自然な日本語で、1文だけ話しかけてください。必ず対話の流れに沿って発言してください。
 返答の形式はセリフのみで、「ロボット：」などはつけないでください。
 """
-        else:
-            return ""
+
+        # ── 比較条件の発話生成 ──
+        elif plan["type"] == "few_utterances":
+            # session_logsは渡された時点で最大10発話になってる
+            full_prompt = f"""
+会話をもとに、ロボットとして、発話を生成してください。
+現在の会話履歴（抜粋）：
+{context}
+
+自然な日本語で、1文だけ話しかけてください。必ず対話の流れに沿って発言してください。
+返答の形式はセリフのみで、「ロボット：」などはつけないでください。
+"""
+            res = client.chat.completions.create(
+                model="gpt-4.1",
+                messages=[{"role": "user", "content": full_prompt}],
+                temperature=0.7
+            )
+            return res.choices[0].message.content.replace("[ロボット]", "").replace("「", "").replace("」", "").strip()
+
+        elif plan["type"] == "random_target":
+            # 固定フレーズ
+            return f"{plan['target']}さんはどう思いますか？"
+
+        # --- 既存の full_prompt に過去発話回避ルールを追記 ---
+        if history:
+            print(f"🤖 過去発話回避ルールを適用: {len(history)}件")
+            full_prompt += "\n\n【注意】過去に以下の発言を行っています。似た内容は繰り返さないようにしてください:\n"
+            for utt in history:
+                full_prompt += f"- {utt}\n"
 
         res = client.chat.completions.create(
             model="gpt-4.1",
@@ -248,4 +321,8 @@ class InterventionPlanner:
             ],
             temperature=0.7
         )
-        return res.choices[0].message.content.replace("[ロボット]", "").replace("「", "").replace("」", "").strip()
+        new_utt = res.choices[0].message.content.replace("[ロボット]", "").replace("「", "").replace("」", "").strip()
+        self.past_utterances[key].append(new_utt)
+        # past_utterancesを確認
+        print(f"🤖 past_utterances: {self.past_utterances}\n")
+        return new_utt

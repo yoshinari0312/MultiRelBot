@@ -1,5 +1,4 @@
 import os
-import csv
 import threading
 import queue
 from collections import defaultdict, deque
@@ -16,11 +15,13 @@ import time
 import socket
 from intervention_planner import InterventionPlanner
 from datetime import datetime
+import config
 
 pepper_ip = "192.168.11.48"  # PepperのIPアドレス
 pepper_port = 2002  # Android アプリのポート
 use_robot = True  # Pepperを使用するかどうか
 robot_included = False  # ロボットを関係性学習に組み込むかどうか
+mode = "proposal"  # "proposal", "few_utterances", "random_target"
 
 
 matplotlib.use("Agg")  # GUI 非対応の描画エンジンを指定
@@ -81,6 +82,7 @@ def perform_arm_lift_async(self):
 
 class CommunityAnalyzer:
     def __init__(self, decay_factor=1.5):
+        self.graph_count = 0
         self.scores = defaultdict(float)
         self.history = defaultdict(lambda: deque(maxlen=3))  # ペアごとの過去発話数（最大3件）
         self.decay_factor = decay_factor
@@ -139,11 +141,10 @@ class CommunityAnalyzer:
             # 直近履歴に追加（最大3件）
             self.history[key].append(session_utterance)
 
-        self._save_csv()
         self._draw_graph()
 
         if socketio_cli.connected:
-            socketio_cli.emit("graph_updated")  # === グラフ更新通知をWebに送信 ===
+            socketio_cli.emit("graph_updated", {"index": self.graph_count, "log_root": os.path.basename(config.LOG_ROOT)})  # === グラフ更新通知をWebに送信 ===
 
         # print(f"関係性推定終了：{datetime.now()}")
 
@@ -220,8 +221,8 @@ class CommunityAnalyzer:
         関係性グラフ・三角形構造をもとに、介入戦略を自動生成して実行する
         """
         # print(f"ロボット介入開始：{datetime.now()}")
-        planner = InterventionPlanner(graph=self._build_graph_object(), triangle_scores=self._compute_triangle_scores())
-        plan = planner.plan_intervention()
+        planner = InterventionPlanner(graph=self._build_graph_object(), triangle_scores=self._compute_triangle_scores(), mode=mode)
+        plan = planner.plan_intervention(session_logs=session_logs)
 
         if not plan:
             print("🤖 介入対象なし（安定状態）")
@@ -265,15 +266,6 @@ class CommunityAnalyzer:
             # 🔁 ロボットの発話も関係性学習に反映させる
             session_with_robot = session_logs + [robot_log]
             self.update(session_with_robot)
-
-    # === CSVに保存 ===
-    def _save_csv(self):
-        with open("output/relationship_scores.csv", "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["Person1", "Person2", "Score"])
-            for (a, b), score in self.scores.items():
-                writer.writerow([a, b, round(score, 2)])
-        print("✅ CSV保存完了: output/relationship_scores.csv")
 
     def _build_graph_object(self) -> nx.Graph:
         G = nx.Graph()
@@ -325,9 +317,12 @@ class CommunityAnalyzer:
         plt.title("関係性グラフ")
         plt.axis("off")
         plt.tight_layout()
-        plt.savefig("output/relationship_graph.png")
+        # グラフ画像をログディレクトリに連番で保存
+        image_path = os.path.join(config.LOG_ROOT, f"relation_graph{self.graph_count}.png")
+        plt.savefig(image_path)
         plt.close()
-        print("✅ グラフ画像保存完了: output/relationship_graph.png")
+        print(f"✅ グラフ画像保存完了: {image_path}")
+        self.graph_count += 1
 
     # === 三角形の構造とスコア平均を計算 ===
     def _compute_triangle_scores(self) -> Dict[Tuple[str, str, str], Tuple[str, float]]:

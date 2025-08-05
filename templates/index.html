@@ -32,9 +32,11 @@
   document.getElementById("stopBtn").onclick  = () => socket.emit("control", {action:"stop"});
 
   /* --- グラフ更新を受信したら <img> をリロード --- */
-  socket.on("refresh_graph", () => {
+  socket.on("refresh_graph", (data) => {
+      // server から渡された index を使ってファイル名を切り替え
+      const { index, log_root } = data;
       const ts = Date.now();
-      graphImg.src = `/output/relationship_graph.png?ts=${ts}`; // キャッシュ回避
+      graphImg.src = `/static/logs/${log_root}/relation_graph${index - 1}.png?ts=${ts}`; // キャッシュ回避
   });
 
   /* --- 発話ログを受信したら末尾に追加 --- */
