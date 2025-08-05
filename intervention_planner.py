@@ -3,7 +3,6 @@ import networkx as nx
 from typing import List, Tuple, Dict, Optional
 from openai import OpenAI
 from dotenv import load_dotenv
-from collections import defaultdict
 from typing import Any
 import random
 
@@ -12,9 +11,8 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 class InterventionPlanner:
-    # 過去のロボット発話を保存する辞書
-    # キーは (plan_type, target, structure, triangle)、値は List[str]
-    past_utterances: Dict[Tuple[Any, ...], List[str]] = defaultdict(list)
+    # 過去のロボット発話を保存するリスト（全モード共通）
+    past_utterances: List[str] = []
 
     def __init__(self, graph: nx.Graph, triangle_scores: Dict[Tuple[str, str, str], Tuple[str, float]], isolation_threshold: float = 0.0, mode: str = "proposal"):
         """
@@ -185,16 +183,8 @@ class InterventionPlanner:
         context = "\n".join([f"[{log['speaker']}] {log['utterance']}" for log in session_logs])  # 会話履歴をテキスト化
         # print(f"🤖 会話履歴:\n{context}\n")
 
-        # キーを作成（介入タイプ／対象／構造／三角形）
-        if plan["type"] == "triangle":
-            key = ("triangle", plan["target"], plan["structure"], tuple(plan["triangle"]))
-        elif plan["type"] == "promotion":
-            key = ("promotion", plan["pairs"][0])
-        else:  # isolation
-            key = ("isolation", plan["target"])
-
-        # 過去の発話をチェック
-        history = self.past_utterances.get(key, [])
+        # 全モード共通で過去発話をチェック
+        history = self.past_utterances
 
         if plan['type'] == 'isolation':
             print(f"🤖 孤立検出: {plan['target']}さん")
@@ -203,17 +193,17 @@ class InterventionPlanner:
 現在の会話履歴（抜粋）：
 {context}
 
+――――――――――
+
 現在、{name}さんは他の人から距離を置かれており、対立関係にあります。
 
-あなたは空気を読みながら発言するロボットです。
-{name}さんが他の人と関係を改善するために、過去の会話を考慮した上で話しかける内容を考えてください。
+あなたは会話をサポートするロボットです。
+過去の会話内容を踏まえて、{name}さんが他の参加者との関係を和らげられるよう、話しかける具体的かつ自然な日本語の一文を考えてください。
 
-例：
-- 「{name}さん、〇〇してみたらいいんじゃないかな」
-- 「そういえば、{name}さん前に〇〇って言ってましたよね」
-
-自然な日本語で、1文だけ話しかけてください。必ず対話の流れに沿って発言してください。
-返答の形式はセリフのみで、「ロボット：」などはつけないでください。
+- 必ず一文で
+- 発言の中に「{name}さん」と呼びかけ対象の名前を入れる
+- 会話の流れに沿った具体的な内容に
+- 「ロボット：」などの話者ラベルは不要
 """
 
         elif plan['type'] == 'triangle':
@@ -229,18 +219,17 @@ class InterventionPlanner:
 現在の会話履歴（抜粋）：
 {context}
 
+――――――――――――――――――――
+
 現在、{target}さんは{other1}さん・{other2}さんとの関係が悪化しています。
 
 あなたは会話をサポートするロボットです。
-{target}さんが他の2人のうち、一方と関係を改善するために、過去の会話を考慮した上で{target}さんに話しかける内容を考えてください。
+過去の会話内容を踏まえて、{target}さんが他の2人のうち、一方と関係を改善するために、{target}さんに話しかける具体的かつ自然な日本語の一文を考えてください。
 
-例：
-- 「{target}さん、{other1}さんも同じようなこと言ってましたね」
-- 「意見は違うけど、□□の部分は似てるかもしれませんね」
-- 「{target}さん、〇〇してみたらいいんじゃないかな」
-
-自然な日本語で、1文だけ話しかけてください。必ず対話の流れに沿って発言してください。
-返答の形式はセリフのみで、「ロボット：」などはつけないでください。
+- 必ず一文で
+- 発言の中に「{target}さん」と呼びかけ対象の名前を入れる
+- 会話の流れに沿った具体的な内容に
+- 「ロボット：」などの話者ラベルは不要
 """
 
             elif struct == '++-' or struct == '+-+' or struct == '-++':
@@ -249,17 +238,19 @@ class InterventionPlanner:
 現在の会話履歴（抜粋）：
 {context}
 
-現在、{target}さんは{other1}さん・{other2}さんと良好な関係を持っています。
-そのため、{target}さんは2人の関係を橋渡しするような発話をすることで、全員がより良い関係を築くことができるかもしれません。
+――――――――――
 
-あなたは会話をサポートするロボットです。
-{target}さんが他の2人の関係を橋渡しするために、過去の会話を考慮した上で{target}さんに話しかける内容を考えてください。
+現在、{target}さんは{other1}さん・{other2}さんと良好な関係を築いています。  
+そこで、{target}さんには{other1}さんと{other2}さんの「橋渡し役」として一言話しかけてもらい、  グループ全体の対話をさらに円滑に進めてほしいと考えています。
 
-例：
-- 「{target}さん、{other1}さんと{other2}さんに関して、意外と〇〇については共通点ありそうですね」
+あなたは会話をサポートするロボットです。  
+過去の会話内容を踏まえて、{target}さんが{other1}さんと{other2}さんの関係を橋渡しするような、  具体的かつ自然な日本語の一文を考えてください。
 
-自然な日本語で、1文だけ話しかけてください。必ず対話の流れに沿って発言してください。
-返答の形式はセリフのみで、「ロボット：」などはつけないでください。
+- 必ず一文で
+- 橋渡しという直接的な内容は避ける
+- 発言の中に「{target}さん」と呼びかけ対象の名前を入れる
+- 会話の流れに沿った具体的な内容に
+- 「ロボット：」などの話者ラベルは不要
 """
             else:
                 full_prompt = ""
@@ -271,34 +262,40 @@ class InterventionPlanner:
 現在の会話履歴（抜粋）：
 {context}
 
+――――――――――
+
 現在、{a}さんと{b}さんの関係は中立的で、やや弱いつながりです。
+
 あなたは会話をサポートするロボットです。
-{a}さんと{b}さんがより深くつながれるよう、過去の会話を考慮した上で共通点を示したり質問を促したりする一文を考えてください。
+過去の会話内容を踏まえて、{a}さんと{b}さんがより深くつながれるよう、共通点を示したり質問を促したりする具体的かつ自然な日本語の一文を考えてください。
 
-例：
-- 「{a}さんと{b}さんは意見は違うけど、〇〇の部分は似ていますね」
-- 「{a}さんと{b}さんの共通点について、もう少し話してみませんか？」
-- 「{a}さんの意見について、{b}さんはどう思いましたか？」
-
-自然な日本語で、1文だけ話しかけてください。必ず対話の流れに沿って発言してください。
-返答の形式はセリフのみで、「ロボット：」などはつけないでください。
+- 必ず一文で
+- 発言の中に「{a}さん」や「{b}さん」と呼びかけ対象の名前を入れる
+- 会話の流れに沿った具体的な内容に
+- 「ロボット：」などの話者ラベルは不要
 """
 
         # ── 比較条件の発話生成 ──
         elif plan["type"] == "few_utterances":
             # session_logsは渡された時点で最大10発話になってる
+            target = plan['target']
             full_prompt = f"""
-会話をもとに、ロボットとして、発話を生成してください。
 現在の会話履歴（抜粋）：
 {context}
 
-自然な日本語で、1文だけ話しかけてください。必ず対話の流れに沿って発言してください。
-返答の形式はセリフのみで、「ロボット：」などはつけないでください。
+――――――――――
+
+会話をもとに、ファシリテーションロボットとして、{target}さんに対するロボットの発言を考えてください。
+
+- 必ず一文で
+- 発言の中に「{target}さん」と呼びかけ対象の名前を入れる
+- 会話の流れに沿った具体的な内容に
+- 「ロボット：」などの話者ラベルは不要
 """
             res = client.chat.completions.create(
                 model="gpt-4.1",
                 messages=[{"role": "user", "content": full_prompt}],
-                temperature=0.7
+                temperature=1.0
             )
             return res.choices[0].message.content.replace("[ロボット]", "").replace("「", "").replace("」", "").strip()
 
@@ -315,14 +312,11 @@ class InterventionPlanner:
 
         res = client.chat.completions.create(
             model="gpt-4.1",
-            messages=[
-                {"role": "system", "content": "あなたは空気を読みながら適切に発言するロボットです。"},
-                {"role": "user", "content": full_prompt}
-            ],
-            temperature=0.7
+            messages=[{"role": "user", "content": full_prompt}],
+            temperature=1.0
         )
         new_utt = res.choices[0].message.content.replace("[ロボット]", "").replace("「", "").replace("」", "").strip()
-        self.past_utterances[key].append(new_utt)
+        self.past_utterances.append(new_utt)
         # past_utterancesを確認
         print(f"🤖 past_utterances: {self.past_utterances}\n")
         return new_utt
