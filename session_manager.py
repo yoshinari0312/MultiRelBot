@@ -54,8 +54,11 @@ class SessionManager:
             # 5 発話ごとに分析
             if self.total_utterance_count % self.analyze_every == 0:
                 window = list(self.current_session)
-                self.analyzer.update(window)
-                print(f"分析実行（{self.analyze_every}発話ごと）: 最新{len(window)}発話を使用")
+                # robot_included の設定に応じて、
+                # True: 5発話→ロボット発話→ロボット込みで関係性推定（ロボットの介入がない時も5発話ごとに推定はする）
+                # False: 5発話→関係性推定→ロボット発話
+                self.analyzer.update_with_robot_if_enabled(window)
+                print(f"分析実行（{self.analyze_every}発話ごと）: 最新{len(window)}発話を使用（robot_included対応）")
 
     def add_utterance(self, log):
         """

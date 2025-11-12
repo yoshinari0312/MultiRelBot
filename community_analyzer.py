@@ -17,10 +17,10 @@ from intervention_planner import InterventionPlanner
 from datetime import datetime
 import config
 
-pepper_ip = "192.168.11.48"  # PepperのIPアドレス
+pepper_ip = "192.168.11.13"  # PepperのIPアドレス
 pepper_port = 2002  # Android アプリのポート
 use_robot = True  # Pepperを使用するかどうか
-robot_included = False  # ロボットを関係性学習に組み込むかどうか
+robot_included = True  # ロボットを関係性学習に組み込むかどうか
 mode = "proposal"  # "proposal", "few_utterances", "random_target"
 
 
@@ -96,6 +96,23 @@ class CommunityAnalyzer:
             session = self.task_queue.get()
             self._analyze(session)
             self.task_queue.task_done()
+
+    # === 5発話ごとの外部トリガに対する統一エントリ ===
+    def update_with_robot_if_enabled(self, session_logs):
+        """
+        robot_included の設定に応じて、以下の動作を行う：
+        - True: 先にロボット発話を生成し、ログに付け足してから update() を一度だけ実行
+        - False: そのまま update()（解析後に _run_intervention() が発火してロボットが喋る）
+        """
+        if robot_included:
+            robot_log = self._plan_and_speak_robot(session_logs)
+            if robot_log:
+                combined = list(session_logs) + [robot_log]
+                return self.update(combined)
+            # 介入不要ならそのまま単回解析
+            return self.update(session_logs)
+        else:
+            return self.update(session_logs)
 
     def update(self, session):
         self.task_queue.put(session)
@@ -266,6 +283,36 @@ class CommunityAnalyzer:
             # 🔁 ロボットの発話も関係性学習に反映させる
             session_with_robot = session_logs + [robot_log]
             self.update(session_with_robot)
+
+    def _plan_and_speak_robot(self, session_logs):
+        """
+        『先にロボットを喋らせ、必要なら robot_log を返す』ためのヘルパ。
+        - robot_included=True の「先ロボ→単回解析」パスで利用
+        - ここでは update() は呼ばない（呼び出し側で単回 update するため）
+        """
+        planner = InterventionPlanner(graph=self._build_graph_object(), triangle_scores=self._compute_triangle_scores(), mode=mode)
+        plan = planner.plan_intervention(session_logs=session_logs)
+        if not plan:
+            print("🤖 介入対象なし（安定状態）")
+            return None
+        if use_robot:
+            send_to_pepper_async("あのー")  # フィラー
+        utterance = planner.generate_robot_utterance(plan, session_logs)
+        robot_log = {
+            "time": datetime.now(),
+            "speaker": "ロボット",
+            "utterance": utterance
+        }
+        # 次の5発話分ロボット識別対象
+        import realtime_communicator as rc
+        rc.set_robot_count(5)
+        print("🤖 ロボット発話を識別対象に設定（次の5発話分）")
+        if socketio_cli.connected:
+            socketio_cli.emit("robot_speak", {"speaker": "ロボット", "utterance": utterance})
+            print(f"💬 ロボット発話送信: {utterance}")
+        if use_robot:
+            send_to_pepper_async(utterance)
+        return robot_log
 
     def _build_graph_object(self) -> nx.Graph:
         G = nx.Graph()
