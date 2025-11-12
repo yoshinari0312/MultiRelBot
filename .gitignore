@@ -1,0 +1,8 @@
+.env
+__pycache__
+communityEnv
+logs
+output
+static/audio
+tmp
+skilful-album-424518-d2-46b828fb306a.json

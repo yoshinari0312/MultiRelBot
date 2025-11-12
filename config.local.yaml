@@ -1,0 +1,158 @@
+env:
+  personas:
+    A:
+      triggers:
+        # 3人共通（15個）
+        - "お金"
+        - "外見"
+        - "時間や締め切り"
+        - "健康"
+        - "仕事"
+        - "恋愛"
+        - "政治"
+        - "宗教"
+        - "法律・権利"
+        - "自然・環境"
+        - "家族"
+        - "友人"
+        - "交通"
+        - "天気"
+        - "プライバシー・セキュリティ"
+        # AB共通（5個）
+        - "勉強"
+        - "研究"
+        - "読書"
+        - "歴史"
+        - "宇宙"
+        # CA共通（5個）
+        - "旅行"
+        - "温泉"
+        - "食べ物"
+        - "映画"
+        - "国際・異文化"
+    B:
+      triggers:
+        # 3人共通（15個）
+        - "お金"
+        - "外見"
+        - "時間や締め切り"
+        - "健康"
+        - "仕事"
+        - "恋愛"
+        - "政治"
+        - "宗教"
+        - "法律・権利"
+        - "自然・環境"
+        - "家族"
+        - "友人"
+        - "交通"
+        - "天気"
+        - "プライバシー・セキュリティ"
+        # AB共通（5個）
+        - "勉強"
+        - "研究"
+        - "読書"
+        - "歴史"
+        - "宇宙"
+        # BC共通（5個）
+        - "ゲーム"
+        - "アニメ"
+        - "ドラマ"
+        - "音楽"
+        - "動物・ペット"
+    C:
+      triggers:
+        # 3人共通（15個）
+        - "お金"
+        - "外見"
+        - "時間や締め切り"
+        - "健康"
+        - "仕事"
+        - "恋愛"
+        - "政治"
+        - "宗教"
+        - "法律・権利"
+        - "自然・環境"
+        - "家族"
+        - "友人"
+        - "交通"
+        - "天気"
+        - "プライバシー・セキュリティ"
+        # BC共通（5個）
+        - "ゲーム"
+        - "アニメ"
+        - "ドラマ"
+        - "音楽"
+        - "動物・ペット"
+        # CA共通（5個）
+        - "旅行"
+        - "温泉"
+        - "食べ物"
+        - "映画"
+        - "国際・異文化"
+  max_steps: 8 # ステップ数ベースの終了条件
+  max_rounds: 6 # ラウンド数ベースの終了条件（1ラウンド = 3人間発話、6ラウンド = 18発話）。今は使ってない
+  include_robot: true
+  intervention_max_history: 3 # 介入判定LLMへの会話履歴（人間発話数）
+  robot_max_history: 6 # ロボット発言LLMへの会話履歴（人間発話数）
+  max_history_human: 12 # 人間LLMへの会話履歴（人間発話数）
+  max_history_relation: 3 # 関係性LLMへの会話履歴（人間発話数）
+  reward_backend: "context_llm"
+  debug: true
+  start_relation_check_after_utterances: 3 # 何発話後から関係性推定を開始するか
+  evaluation_horizon: 3 # ロボットの何発話後の関係性を報酬に使うか
+  max_auto_skip: 10 # 安定状態が何回続いたら話題転換するか
+
+# シミュレーション設定
+simulation:
+  max_human_utterances: 45 # 最大人間発話数（1エピソードあたり）
+  stability_check_interval: 3 # 何人間発話ごとに関係性を評価するか
+  consecutive_stable_threshold: 2 # 何回連続で安定したらエピソード終了とするか
+  num_episodes: 10 # 実行するエピソード数
+  # 安定判定条件:
+  # - unstable_triads == 0 (不安定三角形数が0)
+  # - isolated_nodes == 0 (疎外ノードが0)
+
+scorer:
+  backend: "azure"
+  use_ema: false
+  decay_factor: 1.5
+
+topic_manager:
+  enable: true # トピック提案機能を有効化するか
+  generation_prompt: |
+    あなたは人間3人が話すための、話題を1つだけ提案するアシスタントです。
+    [既に提案した話題]は提示しないでください。
+
+    以下のカテゴリーに関連する話題を生成してください：
+    {trigger_examples}
+
+    このカテゴリーに直接的に関連する具体的な話題を提案してください。
+    例：
+    - 「お金」カテゴリー → 「最近の物価高について」「投資の始め方」
+    - 「ゲーム」カテゴリー → 「最新のゲームトレンド」「eスポーツの将来」
+    - 「映画」カテゴリー → 「今年のアカデミー賞作品」「好きな映画監督」
+
+    話題を1フレーズ（3-10語）で1つだけ提案してください。
+
+llm:
+  provider: "azure"
+  # 以下の機密情報は .env ファイルで設定してください
+  # azure_endpoint: 環境変数 AZURE_ENDPOINT で設定
+  # azure_api_key: 環境変数 AZURE_API_KEY で設定
+  # azure_api_version: 環境変数 AZURE_API_VERSION で設定（デフォルト: "2024-12-01-preview"）
+  # azure_model: 環境変数 AZURE_MODEL で設定（デフォルト: "gpt-5-chat"）
+  # azure_embedding_deployment: 環境変数 AZURE_EMBEDDING_DEPLOYMENT で設定（デフォルト: "text-embedding-3-small"）
+  # azure_embedding_api_version: 環境変数 AZURE_EMBEDDING_API_VERSION で設定（デフォルト: "2024-12-01-preview"）
+  # reasoning_effort: 環境変数 REASONING_EFFORT で設定（デフォルト: "minimal"）
+  # enable_reasoning_param: 環境変数 ENABLE_REASONING_PARAM で設定（デフォルト: false）
+  max_attempts: 5
+  base_backoff: 0.5
+
+  # 各LLM用の個別モデル設定
+  # 以下も .env ファイルで設定可能です
+  # human_model: 環境変数 HUMAN_MODEL で設定（デフォルト: "gpt-4.1"）
+  # relation_model: 環境変数 RELATION_MODEL で設定（デフォルト: "gpt-4.1"）
+  # robot_model: 環境変数 ROBOT_MODEL で設定（デフォルト: "gpt-5-chat"）
+  # topic_model: 環境変数 TOPIC_MODEL で設定（デフォルト: "gpt-5-chat"）
+  # intervention_model: 環境変数 INTERVENTION_MODEL で設定（デフォルト: "gpt-5-chat"）
