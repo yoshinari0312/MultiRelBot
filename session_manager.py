@@ -1,14 +1,15 @@
 import threading
-from openai import OpenAI
 from dotenv import load_dotenv
 import os
 from community_analyzer import CommunityAnalyzer
 from typing import List, Dict
 import queue
+import config
+from azure_clients import get_azure_chat_completion_client, build_chat_completion_params
 
-# 環境変数からOpenAI APIキーを読み込み
+# 環境変数を読み込み
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+_CFG = config.get_config()
 
 
 class SessionManager:
@@ -17,7 +18,12 @@ class SessionManager:
     セッションが確定したらQueueに送ることで、後段の分析処理と非同期に連携できる。
     """
 
-    def __init__(self, time_threshold_sec=90, utterances_per_session: int = 10, analyze_every: int = 5):
+    def __init__(
+        self,
+        time_threshold_sec=90,
+        utterances_per_session: int = 10,
+        analyze_every: int = 5,
+    ):
         """
         :param time_threshold_sec: 発話間の時間差がこの秒数を超えるとセッションが切り替わる
         """
@@ -27,9 +33,10 @@ class SessionManager:
         self.lock = threading.Lock()  # スレッドセーフに処理するためのロック
         # 最新10発話を保持するスライディングウィンドウ
         from collections import deque
+
         self.current_session = deque(maxlen=self.utterances_per_session)
         self.total_utterance_count = 0
-        self.history = []             # 現在のセッションの発話履歴（話題判定に使う）
+        self.history = []  # 現在のセッションの発話履歴（話題判定に使う）
         self.analyzer = CommunityAnalyzer()
 
         self.topic_queue = queue.Queue()
@@ -58,7 +65,9 @@ class SessionManager:
                 # True: 5発話→ロボット発話→ロボット込みで関係性推定（ロボットの介入がない時も5発話ごとに推定はする）
                 # False: 5発話→関係性推定→ロボット発話
                 self.analyzer.update_with_robot_if_enabled(window)
-                print(f"分析実行（{self.analyze_every}発話ごと）: 最新{len(window)}発話を使用（robot_included対応）")
+                print(
+                    f"分析実行（{self.analyze_every}発話ごと）: 最新{len(window)}発話を使用（robot_included対応）"
+                )
 
     def add_utterance(self, log):
         """
@@ -178,7 +187,7 @@ class SessionManager:
 
     def _is_same_topic(self, history_utterances, current_utterance):
         """
-        GPT-4oを使って、これまでの発話と新しい発話が同じ話題かを判定する。
+        Azure OpenAI を使って、これまでの発話と新しい発話が同じ話題かを判定する。
 
         :param history_utterances: 過去の発話リスト
         :param current_utterance: 今回追加される発話
@@ -196,20 +205,32 @@ class SessionManager:
 
 この発話は、上の会話と同じ話題の続きですか？ Yes か No で答えてください。
 """
-        res = client.chat.completions.create(
-            # model="gpt-4o",
-            model="gpt-4.1",
-            messages=[
-                {"role": "system", "content": "あなたは会話分析の専門家です。話題の変化に敏感です。"},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0
+        # Azure OpenAI (HUMAN_MODEL) を使用
+        client, deployment = get_azure_chat_completion_client(
+            _CFG.llm, model_type="human"
         )
+        if not client or not deployment:
+            raise RuntimeError(
+                "Failed to obtain Azure OpenAI client for topic judgment."
+            )
+
+        messages = [
+            {
+                "role": "system",
+                "content": "あなたは会話分析の専門家です。話題の変化に敏感です。",
+            },
+            {"role": "user", "content": prompt},
+        ]
+        params = build_chat_completion_params(
+            deployment, messages, _CFG.llm, temperature=0
+        )
+        res = client.chat.completions.create(**params)
+
         return "yes" in res.choices[0].message.content.strip().lower()
 
     def _are_same_topic(self, history_utterances, current_utterances):
         """
-        GPT-4oを使って、これまでの発話と新しい発話群が同じ話題かを判定する。
+        Azure OpenAI を使って、これまでの発話と新しい発話群が同じ話題かを判定する。
 
         :param history_utterances: 過去の発話リスト
         :param current_utterances: 今回追加される発話リスト
@@ -228,15 +249,27 @@ class SessionManager:
 
 最近の会話は、これまでの会話と同じ話題の続きですか？ Yes か No で答えてください。最近の会話の途中で話題が変わっている場合は、No としてください。
 """
-        res = client.chat.completions.create(
-            # model="gpt-4o",
-            model="gpt-4.1",
-            messages=[
-                {"role": "system", "content": "あなたは会話分析の専門家です。話題の変化に敏感です。"},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0
+        # Azure OpenAI (HUMAN_MODEL) を使用
+        client, deployment = get_azure_chat_completion_client(
+            _CFG.llm, model_type="human"
         )
+        if not client or not deployment:
+            raise RuntimeError(
+                "Failed to obtain Azure OpenAI client for topic judgment."
+            )
+
+        messages = [
+            {
+                "role": "system",
+                "content": "あなたは会話分析の専門家です。話題の変化に敏感です。",
+            },
+            {"role": "user", "content": prompt},
+        ]
+        params = build_chat_completion_params(
+            deployment, messages, _CFG.llm, temperature=0
+        )
+        res = client.chat.completions.create(**params)
+
         return "yes" in res.choices[0].message.content.strip().lower()
 
     def get_current_session_logs(self) -> List[Dict]:

@@ -19,18 +19,27 @@ import soundfile as sf
 from datetime import datetime
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# OpenAI client は音声認識（Whisper）専用
+from openai import OpenAI
+
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
 # Hugging Face にログイン
 login(token=os.getenv("HUGGINGFACE_TOKEN"))
 
 # 話者識別モデルのロード
-diarization_pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=os.getenv("HUGGINGFACE_TOKEN"))
+diarization_pipeline = Pipeline.from_pretrained(
+    "pyannote/speaker-diarization-3.1", use_auth_token=os.getenv("HUGGINGFACE_TOKEN")
+)
 
 # 必要なら GPU を使用
 if torch.cuda.is_available():
     diarization_pipeline.to(torch.device("cuda"))
 
-embedding_model = SpeakerRecognition.from_hparams(source="speechbrain/spkrec-ecapa-voxceleb", savedir="tmp")
+embedding_model = SpeakerRecognition.from_hparams(
+    source="speechbrain/spkrec-ecapa-voxceleb", savedir="tmp"
+)
 
 # 録音設定
 SAMPLE_RATE = 16000  # Whisperの推奨サンプルレート
@@ -95,7 +104,7 @@ def extract_embedding(audio_input):
 
 
 def register_reference_speaker(speaker_name, reference_audio_path):
-    """ 参考音声から話者埋め込みを作成し登録 """
+    """参考音声から話者埋め込みを作成し登録"""
     reference_embedding = extract_embedding(reference_audio_path)
     known_speakers[speaker_name] = reference_embedding
 
@@ -117,7 +126,9 @@ def identify_speaker(audio_buffer):
     for speaker, emb in known_speakers.items():
         similarity = 1 - cosine(new_embedding, emb.flatten())
         print(f"🔍 類似度（{speaker}）: {similarity:.2f}")
-        if similarity > SIMILARITY_THRESHOLD and similarity > best_score:  # SIMILARITY_THRESHOLD 以下なら新規登録。以上なら既存話者から類似度が最も大きいものを選択
+        if (
+            similarity > SIMILARITY_THRESHOLD and similarity > best_score
+        ):  # SIMILARITY_THRESHOLD 以下なら新規登録。以上なら既存話者から類似度が最も大きいものを選択
             best_score = similarity
             best_match = speaker
 
@@ -134,7 +145,11 @@ def diarize_audio(audio_buffer):
     """話者分離を適用して、話者ごとの音声を分離"""
     audio_buffer.seek(0)
     waveform, sample_rate = torchaudio.load(audio_buffer)
-    diarization = diarization_pipeline({"waveform": waveform, "sample_rate": sample_rate}, min_speakers=MIN_SPEAKERS, max_speakers=MAX_SPEAKERS)
+    diarization = diarization_pipeline(
+        {"waveform": waveform, "sample_rate": sample_rate},
+        min_speakers=MIN_SPEAKERS,
+        max_speakers=MAX_SPEAKERS,
+    )
     # diarization = diarization_pipeline({"waveform": waveform, "sample_rate": sample_rate}, num_speakers=NUM_SPEAKERS)
 
     # 🔹 発話順を保持するため、リストを使用
@@ -153,7 +168,13 @@ def record_audio():
     """
     print("録音中...")
     p = pyaudio.PyAudio()
-    stream = p.open(format=FORMAT, channels=CHANNELS, rate=SAMPLE_RATE, input=True, frames_per_buffer=CHUNK)
+    stream = p.open(
+        format=FORMAT,
+        channels=CHANNELS,
+        rate=SAMPLE_RATE,
+        input=True,
+        frames_per_buffer=CHUNK,
+    )
 
     frames = []
     silence_start_time = None
@@ -226,23 +247,29 @@ def process_audio():
                 # 🔹 話者が変わったら、直前の話者の音声を処理
                 if combined_audio_list:
                     combined_waveform = np.concatenate(combined_audio_list, axis=1)
-                    sf.write(current_audio, combined_waveform.T, sample_rate, format="WAV")
+                    sf.write(
+                        current_audio, combined_waveform.T, sample_rate, format="WAV"
+                    )
                     current_audio.seek(0)
 
                     recognized_speaker = identify_speaker(current_audio)
                     if recognized_speaker == "未識別":
-                        print("⚠️ 話者が識別できなかったため、文字起こしをスキップします。")
+                        print(
+                            "⚠️ 話者が識別できなかったため、文字起こしをスキップします。"
+                        )
                     else:
-                        transcript = client.audio.transcriptions.create(
+                        transcript = openai_client.audio.transcriptions.create(
                             # model="whisper-1",
                             # model="gpt-4o-mini-transcribe",  # 速度重視
                             model="gpt-4o-transcribe",
                             file=("audio_segment.wav", current_audio, "audio/wav"),
-                            language="ja"
+                            language="ja",
                         )
                         print(f"[{recognized_speaker}] {transcript.text}")
                         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        log_line = f"[{timestamp}] [{recognized_speaker}] {transcript.text}"
+                        log_line = (
+                            f"[{timestamp}] [{recognized_speaker}] {transcript.text}"
+                        )
                         conversation_log.append(log_line)
 
                 # 🔹 新しい話者のためにリセット
@@ -261,12 +288,12 @@ def process_audio():
             if recognized_speaker == "未識別":
                 print("⚠️ 話者が識別できなかったため、文字起こしをスキップします。")
             else:
-                transcript = client.audio.transcriptions.create(
+                transcript = openai_client.audio.transcriptions.create(
                     # model="whisper-1",
                     # model="gpt-4o-mini-transcribe",  # 速度重視
                     model="gpt-4o-transcribe",
                     file=("audio_segment.wav", current_audio, "audio/wav"),
-                    language="ja"
+                    language="ja",
                 )
                 print(f"[{recognized_speaker}] {transcript.text}")
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

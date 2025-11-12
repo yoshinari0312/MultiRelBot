@@ -1,20 +1,27 @@
 import os
 import networkx as nx
 from typing import List, Tuple, Dict, Optional
-from openai import OpenAI
 from dotenv import load_dotenv
 from typing import Any
 import random
+import config
+from azure_clients import get_azure_chat_completion_client, build_chat_completion_params
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+_CFG = config.get_config()
 
 
 class InterventionPlanner:
     # 過去のロボット発話を保存するリスト（全モード共通）
     past_utterances: List[str] = []
 
-    def __init__(self, graph: nx.Graph, triangle_scores: Dict[Tuple[str, str, str], Tuple[str, float]], isolation_threshold: float = 0.0, mode: str = "proposal"):
+    def __init__(
+        self,
+        graph: nx.Graph,
+        triangle_scores: Dict[Tuple[str, str, str], Tuple[str, float]],
+        isolation_threshold: float = 0.0,
+        mode: str = "proposal",
+    ):
         """
         :param graph: NetworkXグラフ。ノードは人物、エッジは関係性スコア（-1〜1）を持つ
         :param triangle_scores: 三角形ごとの構造タイプ（---, ++- など）とスコア平均
@@ -33,7 +40,9 @@ class InterventionPlanner:
         candidates = []
 
         for node in self.graph.nodes:
-            edges = [self.graph[node][nbr]['score'] for nbr in self.graph.neighbors(node)]
+            edges = [
+                self.graph[node][nbr]["score"] for nbr in self.graph.neighbors(node)
+            ]
             if len(edges) >= 2 and all(edge < self.theta_iso for edge in edges):
                 avg_score = sum(edges) / len(edges)
                 candidates.append((node, avg_score))
@@ -50,6 +59,7 @@ class InterventionPlanner:
         優先度：---（最も不安定） > ++-系（認知的不協和） > その他
         スコア平均が低いものを優先
         """
+
         # 三角形の構造タイプを優先度に基づいてソートするためのヘルパー関数
         def structure_priority(struct_type: str) -> int:
             return {"---": 0, "++-": 1, "+-+": 1, "-++": 1}.get(struct_type, 999)
@@ -59,10 +69,12 @@ class InterventionPlanner:
             self.triangle_scores.items(),
             key=lambda item: (
                 structure_priority(item[1][0]),  # 構造タイプの優先度（--- が最優先）
-                item[1][1]                       # スコア平均（低い方が優先）
-            )
+                item[1][1],  # スコア平均（低い方が優先）
+            ),
         )
-        return [tri[0] for tri in sorted_triangles]  # [(a, b, c), (b, c, d), ...] の形で返す
+        return [
+            tri[0] for tri in sorted_triangles
+        ]  # [(a, b, c), (b, c, d), ...] の形で返す
 
     def select_intervention_triangle(self) -> Optional[Tuple[str, str, str]]:
         """
@@ -84,20 +96,26 @@ class InterventionPlanner:
         """
         a, b, c = triangle
         scores = {
-            (a, b): self.graph[a][b]['score'],
-            (b, c): self.graph[b][c]['score'],
-            (c, a): self.graph[c][a]['score'],
+            (a, b): self.graph[a][b]["score"],
+            (b, c): self.graph[b][c]["score"],
+            (c, a): self.graph[c][a]["score"],
         }
 
-        if self.triangle_scores[triangle][0] == '---':
+        if self.triangle_scores[triangle][0] == "---":
             avg_scores = {
                 a: (scores[(a, b)] + scores[(c, a)]) / 2,
                 b: (scores[(a, b)] + scores[(b, c)]) / 2,
-                c: (scores[(b, c)] + scores[(c, a)]) / 2
+                c: (scores[(b, c)] + scores[(c, a)]) / 2,
             }
-            return max(avg_scores.items(), key=lambda x: x[1])[0]  # スコア平均が最も高いノードを返す
+            return max(avg_scores.items(), key=lambda x: x[1])[
+                0
+            ]  # スコア平均が最も高いノードを返す
 
-        elif self.triangle_scores[triangle][0] == '++-' or self.triangle_scores[triangle][0] == '+-+' or self.triangle_scores[triangle][0] == '-++':
+        elif (
+            self.triangle_scores[triangle][0] == "++-"
+            or self.triangle_scores[triangle][0] == "+-+"
+            or self.triangle_scores[triangle][0] == "-++"
+        ):
             counts = {n: 0 for n in triangle}  # エッジが+の数をカウントするための辞書
             for (u, v), w in scores.items():
                 if w > 0:
@@ -107,7 +125,9 @@ class InterventionPlanner:
 
         return triangle[0]
 
-    def plan_intervention(self, session_logs: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    def plan_intervention(
+        self, session_logs: List[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
         """
         介入戦略の全体フローを実行し、介入対象ノードとその構造を返す
         """
@@ -123,28 +143,19 @@ class InterventionPlanner:
             print("発話量（文字数）:", counts)
             target = min(counts, key=counts.get)
             print(f"🤖 発話量少ない人: {target}さん")
-            return {
-                "type": "few_utterances",
-                "target": target
-            }
+            return {"type": "few_utterances", "target": target}
 
         # --- ランダム対象に固定フレーズ ---
         if self.mode == "random_target" and session_logs:
             participants = list({log["speaker"] for log in session_logs})
             target = random.choice(participants)
             print(f"🤖 ランダム対象: {target}さん")
-            return {
-                "type": "random_target",
-                "target": target
-            }
+            return {"type": "random_target", "target": target}
 
         # Step 1: 孤立検出
         isolated = self.detect_structural_isolation()
         if isolated:
-            return {
-                "type": "isolation",
-                "target": isolated
-            }
+            return {"type": "isolation", "target": isolated}
 
         # Step 2〜4: 不安定三角形に基づく介入
         triangle = self.select_intervention_triangle()
@@ -152,9 +163,11 @@ class InterventionPlanner:
             target_node = self.choose_target_node(triangle)
             return {
                 "type": "triangle",
-                "structure": self.triangle_scores[triangle][0],  # 例: '---', '++-', '+-+', '-++'
+                "structure": self.triangle_scores[triangle][
+                    0
+                ],  # 例: '---', '++-', '+-+', '-++'
                 "triangle": triangle,  # 例: ('A', 'B', 'C')
-                "target": target_node  # 例: 'A'（ロボットが話しかけるべきノード）
+                "target": target_node,  # 例: 'A'（ロボットが話しかけるべきノード）
             }
 
         # Step 5: 安定状態だが弱リンク(0.0～0.2)がある場合 → 関係形成支援介入
@@ -166,29 +179,30 @@ class InterventionPlanner:
         if weak_pairs_scores:
             # 最もスコアが小さいペアを1つだけ選択
             target_pair, _ = min(weak_pairs_scores, key=lambda x: x[1])
-            return {
-                "type": "promotion",
-                "pairs": [target_pair]
-            }
+            return {"type": "promotion", "pairs": [target_pair]}
 
         return None  # 介入なし
 
-    def generate_robot_utterance(self, plan: Dict[str, str], session_logs: List[Dict]) -> str:
+    def generate_robot_utterance(
+        self, plan: Dict[str, str], session_logs: List[Dict]
+    ) -> str:
         """
         会話履歴と介入プランをもとに、GPTによるロボット発話を生成する
         :param plan: plan_intervention() の出力（dict）
         :param session_logs: セッション内の会話ログ（辞書のリスト）
         :return: ロボットが発話すべき内容（文字列）
         """
-        context = "\n".join([f"[{log['speaker']}] {log['utterance']}" for log in session_logs])  # 会話履歴をテキスト化
+        context = "\n".join(
+            [f"[{log['speaker']}] {log['utterance']}" for log in session_logs]
+        )  # 会話履歴をテキスト化
         # print(f"🤖 会話履歴:\n{context}\n")
 
         # 全モード共通で過去発話をチェック
         history = self.past_utterances
 
-        if plan['type'] == 'isolation':
+        if plan["type"] == "isolation":
             print(f"🤖 孤立検出: {plan['target']}さん")
-            name = plan['target']
+            name = plan["target"]
             full_prompt = f"""
 現在の会話履歴（抜粋）：
 {context}
@@ -207,14 +221,14 @@ class InterventionPlanner:
 - 「ロボット：」などの話者ラベルは不要
 """
 
-        elif plan['type'] == 'triangle':
-            a, b, c = plan['triangle']
-            struct = plan['structure']
-            target = plan['target']
+        elif plan["type"] == "triangle":
+            a, b, c = plan["triangle"]
+            struct = plan["structure"]
+            target = plan["target"]
             others = [n for n in (a, b, c) if n != target]
             other1, other2 = others[0], others[1]
 
-            if struct == '---':
+            if struct == "---":
                 print(f"🤖 ---検出: {target}さん（{other1}さん・{other2}さん）")
                 full_prompt = f"""
 現在の会話履歴（抜粋）：
@@ -234,7 +248,7 @@ class InterventionPlanner:
 - 「ロボット：」などの話者ラベルは不要
 """
 
-            elif struct == '++-' or struct == '+-+' or struct == '-++':
+            elif struct == "++-" or struct == "+-+" or struct == "-++":
                 print(f"🤖 ++-系検出: {target}さん（{other1}さん・{other2}さん）")
                 full_prompt = f"""
 現在の会話履歴（抜粋）：
@@ -258,9 +272,9 @@ class InterventionPlanner:
             else:
                 full_prompt = ""
 
-        elif plan['type'] == 'promotion':
+        elif plan["type"] == "promotion":
             # 弱リンクを選んで、一文で関係形成支援を促す
-            a, b = plan['pairs'][0]
+            a, b = plan["pairs"][0]
             full_prompt = f"""
 現在の会話履歴（抜粋）：
 {context}
@@ -282,7 +296,7 @@ class InterventionPlanner:
         # ── 比較条件の発話生成 ──
         elif plan["type"] == "few_utterances":
             # session_logsは渡された時点で最大10発話になってる
-            target = plan['target']
+            target = plan["target"]
             full_prompt = f"""
 現在の会話履歴（抜粋）：
 {context}
@@ -296,12 +310,28 @@ class InterventionPlanner:
 - 会話の流れに沿った具体的な内容に
 - 「ロボット：」などの話者ラベルは不要
 """
-            res = client.chat.completions.create(
-                model="gpt-4.1",
-                messages=[{"role": "user", "content": full_prompt}],
-                temperature=1.0
+            # Azure OpenAIを使用
+            client, deployment = get_azure_chat_completion_client(
+                _CFG.llm, model_type="robot"
             )
-            return res.choices[0].message.content.replace("[ロボット]", "").replace("「", "").replace("」", "").strip()
+            if not client or not deployment:
+                raise RuntimeError(
+                    "Failed to obtain Azure OpenAI client for robot utterance generation."
+                )
+
+            messages = [{"role": "user", "content": full_prompt}]
+            params = build_chat_completion_params(
+                deployment, messages, _CFG.llm, temperature=1.0
+            )
+            res = client.chat.completions.create(**params)
+
+            return (
+                res.choices[0]
+                .message.content.replace("[ロボット]", "")
+                .replace("「", "")
+                .replace("」", "")
+                .strip()
+            )
 
         elif plan["type"] == "random_target":
             # 固定フレーズ
@@ -314,12 +344,28 @@ class InterventionPlanner:
             for utt in history:
                 full_prompt += f"- {utt}\n"
 
-        res = client.chat.completions.create(
-            model="gpt-4.1",
-            messages=[{"role": "user", "content": full_prompt}],
-            temperature=1.0
+        # Azure OpenAI を使用
+        client, deployment = get_azure_chat_completion_client(
+            _CFG.llm, model_type="robot"
         )
-        new_utt = res.choices[0].message.content.replace("[ロボット]", "").replace("「", "").replace("」", "").strip()
+        if not client or not deployment:
+            raise RuntimeError(
+                "Failed to obtain Azure OpenAI client for robot utterance generation."
+            )
+
+        messages = [{"role": "user", "content": full_prompt}]
+        params = build_chat_completion_params(
+            deployment, messages, _CFG.llm, temperature=1.0
+        )
+        res = client.chat.completions.create(**params)
+
+        new_utt = (
+            res.choices[0]
+            .message.content.replace("[ロボット]", "")
+            .replace("「", "")
+            .replace("」", "")
+            .strip()
+        )
         self.past_utterances.append(new_utt)
         # past_utterancesを確認
         print(f"🤖 past_utterances: {self.past_utterances}\n")

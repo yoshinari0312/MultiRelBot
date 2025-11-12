@@ -8,7 +8,9 @@ from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# OpenAI client は音声認識（Whisper）専用
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 # 録音設定
@@ -86,17 +88,15 @@ audio_source = record_audio(SAMPLE_RATE, CHUNK, THRESHOLD, SILENCE_DURATION)
 if SAVE_AUDIO:
     # 保存した音声ファイルを Whisper に渡す
     with open(audio_source, "rb") as audio_file:
-        transcript = client.audio.transcriptions.create(
-            model="gpt-4o-transcribe",
-            file=audio_file,
-            language="ja"
+        transcript = openai_client.audio.transcriptions.create(
+            model="gpt-4o-transcribe", file=audio_file, language="ja"
         )
 else:
     # メモリ内の音声データを Whisper に渡す
-    transcript = client.audio.transcriptions.create(
+    transcript = openai_client.audio.transcriptions.create(
         model="gpt-4o-transcribe",
         file=("speech.wav", audio_source, "audio/wav"),
-        language="ja"
+        language="ja",
     )
 
 # 結果を表示

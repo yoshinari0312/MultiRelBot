@@ -3,13 +3,14 @@ import re
 import networkx as nx
 from itertools import combinations
 from typing import List, Dict, Tuple
-from openai import OpenAI
 from dotenv import load_dotenv
 from intervention_planner import InterventionPlanner
 import sys
+import config
+from azure_clients import get_azure_chat_completion_client, build_chat_completion_params
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+_CFG = config.get_config()
 
 
 # === 会話ログ読み込み ===
@@ -20,17 +21,19 @@ def load_session_logs(filepath: str) -> List[Dict]:
             match = re.match(r"\[(.*?)\]\s+\[(.*?)\]\s+(.*)", line.strip())
             if match:
                 timestamp, speaker, utterance = match.groups()
-                logs.append({
-                    "time": timestamp,
-                    "speaker": speaker,
-                    "utterance": utterance
-                })
+                logs.append(
+                    {"time": timestamp, "speaker": speaker, "utterance": utterance}
+                )
     return logs
 
 
 # === GPTでペアごとの関係性を推定 ===
-def estimate_relationship_scores(logs: List[Dict], participants: List[str]) -> Dict[Tuple[str, str], float]:
-    conversation_text = "\n".join([f"[{log['speaker']}] {log['utterance']}" for log in logs])
+def estimate_relationship_scores(
+    logs: List[Dict], participants: List[str]
+) -> Dict[Tuple[str, str], float]:
+    conversation_text = "\n".join(
+        [f"[{log['speaker']}] {log['utterance']}" for log in logs]
+    )
     pairs = list(combinations(participants, 2))
     pair_lines = "\n".join([f"- {a} × {b}" for a, b in pairs])
     output_format = "\n".join([f"{a}-{b}:" for a, b in pairs])
@@ -48,12 +51,18 @@ def estimate_relationship_scores(logs: List[Dict], participants: List[str]) -> D
 {output_format}
 """
 
-    response = client.chat.completions.create(
-        # model="gpt-4o",
-        model="gpt-4.1",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3
+    # Azure OpenAI (RELATION_MODEL) を使用
+    client, deployment = get_azure_chat_completion_client(
+        _CFG.llm, model_type="relation"
     )
+    if not client or not deployment:
+        raise RuntimeError("Failed to obtain Azure OpenAI client for relation scoring.")
+
+    messages = [{"role": "user", "content": prompt}]
+    params = build_chat_completion_params(
+        deployment, messages, _CFG.llm, temperature=0.3
+    )
+    response = client.chat.completions.create(**params)
 
     scores = {}
     for line in response.choices[0].message.content.strip().split("\n"):
@@ -69,7 +78,9 @@ def estimate_relationship_scores(logs: List[Dict], participants: List[str]) -> D
 
 
 # === グラフと三角形構造の構築 ===
-def build_graph_and_triangles(scores: Dict[Tuple[str, str], float]) -> Tuple[nx.Graph, Dict[Tuple[str, str, str], Tuple[str, float]]]:
+def build_graph_and_triangles(
+    scores: Dict[Tuple[str, str], float],
+) -> Tuple[nx.Graph, Dict[Tuple[str, str, str], Tuple[str, float]]]:
     G = nx.Graph()
     for (a, b), s in scores.items():
         G.add_edge(a, b, score=s)
@@ -78,12 +89,12 @@ def build_graph_and_triangles(scores: Dict[Tuple[str, str], float]) -> Tuple[nx.
     for a, b, c in combinations(G.nodes, 3):
         if G.has_edge(a, b) and G.has_edge(b, c) and G.has_edge(c, a):
             s = {
-                (a, b): G[a][b]['score'],
-                (b, c): G[b][c]['score'],
-                (c, a): G[c][a]['score']
+                (a, b): G[a][b]["score"],
+                (b, c): G[b][c]["score"],
+                (c, a): G[c][a]["score"],
             }
-            signs = ['+' if s[p] >= 0 else '-' for p in [(a, b), (b, c), (c, a)]]
-            structure = ''.join(signs)
+            signs = ["+" if s[p] >= 0 else "-" for p in [(a, b), (b, c), (c, a)]]
+            structure = "".join(signs)
             average = sum(s.values()) / 3
             triangle_scores[(a, b, c)] = (structure, average)
     return G, triangle_scores
