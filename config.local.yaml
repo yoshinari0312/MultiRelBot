@@ -93,20 +93,76 @@ env:
   max_steps: 8 # ステップ数ベースの終了条件
   max_rounds: 6 # ラウンド数ベースの終了条件（1ラウンド = 3人間発話、6ラウンド = 18発話）。今は使ってない
   include_robot: true
-  intervention_max_history: 3 # 介入判定LLMへの会話履歴（人間発話数）
-  robot_max_history: 6 # ロボット発言LLMへの会話履歴（人間発話数）
-  max_history_human: 12 # 人間LLMへの会話履歴（人間発話数）
-  max_history_relation: 3 # 関係性LLMへの会話履歴（人間発話数）
+  intervention_max_history: 9 # 介入判定・ロボット発話LLMへの会話履歴（人間発話数。その間のロボット発話も含む）
+  max_history_human: 12 # 人間LLMへの会話履歴（人間発話数。その間のロボット発話も含む）
+  max_history_relation: 9 # 関係性LLMへの会話履歴（人間発話数。その間のロボット発話も含む）
   reward_backend: "context_llm"
   debug: true
   start_relation_check_after_utterances: 3 # 何発話後から関係性推定を開始するか
   evaluation_horizon: 3 # ロボットの何発話後の関係性を報酬に使うか
   max_auto_skip: 10 # 安定状態が何回続いたら話題転換するか
 
+# 音声認識・話者識別設定
+realtime:
+  # 音声認識設定
+  silence_duration: 0.5 # 無音が続いたら送信する秒数
+  use_google_stt: "v1" # 音声認識モデル ("v1": v1の非ストリーミング、"v1-streaming": v1のストリーミング、"v2-streaming": v2のストリーミング、false: OpenAI)
+  use_direct_stream: false # true にするとマイクチャンクを直接STTへ流し込む
+
+  # 話者分離設定
+  diarization_threshold: 50 # この秒数以上なら話者分離する（秒数）
+  skip_threshold_bytes: 30000 # 音声データのバイト数がこの値以下なら処理をスキップ
+
+  # セッション管理設定
+  n_batch: 5 # セッション分割判定の頻度（N発話ごと）
+  utterances_per_session: 10 # 何発話分を分析するか（スライディングウィンドウのサイズ）
+  analyze_every: 5 # 何発話ごとに関係性推定するか
+
+  # ロボット設定
+  robot_count_after_intervention: 5 # 介入決定してから何発話、ロボットを話者識別に組み込むか
+
+# 参加者設定
+participants:
+  num_participants: 3 # 参加者数（3 or 4）
+  speakers: # 話者リスト（話者名: 音声サンプルファイルパス）
+    # ロボット: "static/audio/robot_sample.wav"
+    # 小野寺: "static/audio/onodera_sample.wav"
+    # 佐藤: "static/audio/sato_sample.wav"
+    # 田中: "static/audio/tanaka_sample.wav"
+    # 以下は必要に応じてコメントアウトを外す
+    # 今井: "static/audio/imai_sample.wav"
+    # 大場: "static/audio/oba_sample.wav"
+    # 馬場: "static/audio/hibiki_sample.wav"
+    # 三宅: "static/audio/serina_sample.wav"
+    # 中西: "static/audio/nakanishi_sample.wav"
+    # 松室: "static/audio/matsumuro_sample.wav"
+    # 高山: "static/audio/takayama_sample.wav"
+    # 立川: "static/audio/kanta_sample.wav"
+    # 松崎: "static/audio/matsuzaki_sample.wav"
+    # 松岡: "static/audio/matsuoka_sample.wav"
+    # けいじろう: "static/audio/keijiro_sample.wav"
+    # ゆうき: "static/audio/yuki_sample.wav"
+    # 中村: "static/audio/nakamura_sample.wav"
+    # 浅田: "static/audio/asada_sample.wav"
+    # 草野: "static/audio/kusano_sample.wav"
+
+# Pepper設定
+pepper:
+  ip: "192.168.11.13" # PepperのIPアドレス
+  port: 2002 # Android アプリのポート
+  use_robot: true # Pepperを使用するかどうか
+  robot_included: false # ロボットを関係性学習に組み込むかどうか
+
+# 介入戦略設定
+intervention:
+  mode: "proposal" # 介入モード ("proposal": グラフ構造ベース、"few_utterances": 発話量少ない人、"random_target": ランダム)
+  isolation_threshold: 0.0 # 孤立判定のスコア閾値（これ未満の関係しか持たないと孤立とみなす）
+  temperature: 1.0 # 介入発話生成時のLLM温度パラメータ
+
 # シミュレーション設定
 simulation:
   max_human_utterances: 45 # 最大人間発話数（1エピソードあたり）
-  stability_check_interval: 3 # 何人間発話ごとに関係性を評価するか
+  # stability_check_interval: 3 # 廃止: 代わりにnum_participantsを使用（参加者数発話ごとに関係性を評価）
   consecutive_stable_threshold: 2 # 何回連続で安定したらエピソード終了とするか
   num_episodes: 10 # 実行するエピソード数
   # 安定判定条件:
@@ -148,6 +204,7 @@ llm:
   # enable_reasoning_param: 環境変数 ENABLE_REASONING_PARAM で設定（デフォルト: false）
   max_attempts: 5
   base_backoff: 0.5
+  relation_temperature: 0.3 # 関係性推定時のLLM温度パラメータ
 
   # 各LLM用の個別モデル設定
   # 以下も .env ファイルで設定可能です

@@ -21,15 +21,23 @@ class SessionManager:
     def __init__(
         self,
         time_threshold_sec=90,
-        utterances_per_session: int = 10,
-        analyze_every: int = 5,
+        utterances_per_session: int = None,
+        analyze_every: int = None,
     ):
         """
         :param time_threshold_sec: 発話間の時間差がこの秒数を超えるとセッションが切り替わる
+        :param utterances_per_session: 何発話分を分析するか（スライディングウィンドウのサイズ）、Noneの場合はconfig.local.yamlから読み込み
+        :param analyze_every: 何発話ごとに関係性推定するか、Noneの場合はconfig.local.yamlから読み込み
         """
         self.time_threshold_sec = time_threshold_sec
-        self.utterances_per_session = utterances_per_session
-        self.analyze_every = analyze_every
+        self.utterances_per_session = (
+            utterances_per_session
+            if utterances_per_session is not None
+            else _CFG.realtime.get("utterances_per_session", 10)
+        )
+        self.analyze_every = (
+            analyze_every if analyze_every is not None else _CFG.realtime.get("analyze_every", 5)
+        )
         self.lock = threading.Lock()  # スレッドセーフに処理するためのロック
         # 最新10発話を保持するスライディングウィンドウ
         from collections import deque

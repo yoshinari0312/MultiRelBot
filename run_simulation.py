@@ -32,22 +32,26 @@ def calculate_statistics(all_stats: List[Dict]) -> Dict:
     if not all_stats:
         return {}
 
-    # 安定達成したエピソード
-    stable_episodes = [s for s in all_stats if s["final_stable"]]
-    stable_rate = len(stable_episodes) / len(all_stats) if all_stats else 0.0
+    # 早期終了エピソード（2連続安定で終了）
+    early_termination_episodes = [s for s in all_stats if s.get("early_termination", False)]
+    stable_completion_rate = len(early_termination_episodes) / len(all_stats) if all_stats else 0.0
 
-    # 疎外ノードが発生したエピソード
-    isolated_episodes = [s for s in all_stats if len(s["final_isolated_nodes"]) > 0]
-    isolated_rate = len(isolated_episodes) / len(all_stats) if all_stats else 0.0
+    # 一度でも安定を達成したエピソード
+    stability_achieved_episodes = [
+        s for s in all_stats if s.get("first_stable_utterance") is not None
+    ]
+    stability_achieved_rate = (
+        len(stability_achieved_episodes) / len(all_stats) if all_stats else 0.0
+    )
 
-    # 安定達成エピソードの統計
-    if stable_episodes:
+    # 早期終了エピソードの統計
+    if early_termination_episodes:
         avg_human_utterances_to_stable = sum(
-            s["human_utterance_count"] for s in stable_episodes
-        ) / len(stable_episodes)
+            s["human_utterance_count"] for s in early_termination_episodes
+        ) / len(early_termination_episodes)
         avg_robot_utterances_to_stable = sum(
-            s["robot_utterance_count"] for s in stable_episodes
-        ) / len(stable_episodes)
+            s["robot_utterance_count"] for s in early_termination_episodes
+        ) / len(early_termination_episodes)
     else:
         avg_human_utterances_to_stable = None
         avg_robot_utterances_to_stable = None
@@ -61,22 +65,91 @@ def calculate_statistics(all_stats: List[Dict]) -> Dict:
     )
     avg_duration = sum(s["duration_seconds"] for s in all_stats) / len(all_stats)
 
-    # 不安定三角形数の平均
-    avg_unstable_triads = sum(s["final_unstable_triads"] for s in all_stats) / len(
+    # 不安定三角形数の平均（最終値）
+    avg_final_unstable_triads = sum(s["final_unstable_triads"] for s in all_stats) / len(
         all_stats
     )
 
+    # 新規指標の平均
+    avg_stability_rate = sum(s.get("stability_rate", 0.0) for s in all_stats) / len(
+        all_stats
+    )
+    avg_isolation_occurrence_rate = sum(
+        s.get("isolation_occurrence_rate", 0.0) for s in all_stats
+    ) / len(all_stats)
+
+    # 初回安定発話数（達成したエピソードのみ）
+    first_stable_utterances = [
+        s["first_stable_utterance"]
+        for s in all_stats
+        if s.get("first_stable_utterance") is not None
+    ]
+    avg_first_stable_utterance = (
+        sum(first_stable_utterances) / len(first_stable_utterances)
+        if first_stable_utterances
+        else None
+    )
+
+    avg_oscillation_count = sum(s.get("oscillation_count", 0) for s in all_stats) / len(
+        all_stats
+    )
+    avg_consecutive_unstable_max = sum(
+        s.get("consecutive_unstable_max", 0) for s in all_stats
+    ) / len(all_stats)
+
+    avg_edge_score = sum(s.get("avg_edge_score", 0.0) for s in all_stats) / len(all_stats)
+    avg_positive_ratio = sum(s.get("avg_positive_ratio", 0.0) for s in all_stats) / len(
+        all_stats
+    )
+
+    avg_intervention_success_rate = sum(
+        s.get("intervention_success_rate", 0.0) for s in all_stats
+    ) / len(all_stats)
+    avg_improvement_per_intervention = sum(
+        s.get("avg_improvement_per_intervention", 0.0) for s in all_stats
+    ) / len(all_stats)
+    avg_intervention_frequency = sum(
+        s.get("intervention_frequency", 0.0) for s in all_stats
+    ) / len(all_stats)
+
+    # 新規指標
+    avg_stable_rate_per_intervention = sum(
+        s.get("stable_rate_per_intervention", 0.0) for s in all_stats
+    ) / len(all_stats)
+    avg_interventions_per_stable = sum(
+        s.get("interventions_per_stable", 0.0) for s in all_stats
+    ) / len(all_stats)
+
     stats = {
         "total_episodes": len(all_stats),
-        "stable_episodes": len(stable_episodes),
-        "stable_rate": stable_rate,
-        "isolated_episodes": len(isolated_episodes),
-        "isolated_rate": isolated_rate,
+        # 基本指標
+        "stable_completion_rate": stable_completion_rate,
+        "stable_completion_episodes": len(early_termination_episodes),
+        "stability_achieved_rate": stability_achieved_rate,
+        "stability_achieved_episodes": len(stability_achieved_episodes),
+        # 安定性指標
+        "avg_stability_rate": avg_stability_rate,
+        "avg_isolation_occurrence_rate": avg_isolation_occurrence_rate,
+        # 発話数指標
         "avg_human_utterances": avg_human_utterances,
         "avg_robot_utterances": avg_robot_utterances,
         "avg_human_utterances_to_stable": avg_human_utterances_to_stable,
         "avg_robot_utterances_to_stable": avg_robot_utterances_to_stable,
-        "avg_unstable_triads": avg_unstable_triads,
+        "avg_first_stable_utterance": avg_first_stable_utterance,
+        # 構造指標
+        "avg_final_unstable_triads": avg_final_unstable_triads,
+        "avg_oscillation_count": avg_oscillation_count,
+        "avg_consecutive_unstable_max": avg_consecutive_unstable_max,
+        # 関係性スコア指標
+        "avg_edge_score": avg_edge_score,
+        "avg_positive_ratio": avg_positive_ratio,
+        # 介入効果指標
+        "avg_intervention_success_rate": avg_intervention_success_rate,
+        "avg_improvement_per_intervention": avg_improvement_per_intervention,
+        "avg_intervention_frequency": avg_intervention_frequency,
+        "avg_stable_rate_per_intervention": avg_stable_rate_per_intervention,
+        "avg_interventions_per_stable": avg_interventions_per_stable,
+        # その他
         "avg_duration_seconds": avg_duration,
     }
 
@@ -131,6 +204,35 @@ def save_results(all_stats: List[Dict], summary_stats: Dict, output_dir: str):
     print(f"💾 各エピソードの詳細を保存: {output_path}")
 
 
+def print_episode_details(all_stats: List[Dict]):
+    """
+    エピソードごとの詳細を表示
+
+    Args:
+        all_stats: 各エピソードの統計リスト
+    """
+    print(f"\n{'='*80}")
+    print(f"📋 エピソードごとの詳細")
+    print(f"{'='*80}")
+
+    for stats in all_stats:
+        episode_id = stats["episode_id"]
+        print(f"\n--- エピソード {episode_id} ---")
+        print(f"話題: {stats['topic']}")
+        if stats.get("topic_trigger"):
+            print(f"トリガー: {stats['topic_trigger']}")
+        print(f"人間発話数: {stats['human_utterance_count']}")
+        print(f"ロボット介入回数: {stats['robot_utterance_count']}")
+        print(f"早期終了: {'✅ はい' if stats['early_termination'] else '❌ いいえ'}")
+        print(f"安定率: {stats['stability_rate']*100:.1f}%")
+        if stats.get("first_stable_utterance"):
+            print(f"初回安定達成: {stats['first_stable_utterance']}発話")
+        print(f"介入成功率: {stats['intervention_success_rate']*100:.1f}%")
+        print(f"1介入あたりの安定評価回数: {stats['stable_rate_per_intervention']:.2f}")
+        print(f"1安定あたりのロボット介入回数: {stats['interventions_per_stable']:.2f}")
+        print(f"所要時間: {stats['duration_seconds']:.1f}秒")
+
+
 def print_summary(stats: Dict):
     """
     サマリー統計を表示
@@ -139,28 +241,55 @@ def print_summary(stats: Dict):
         stats: 集計統計
     """
     print(f"\n{'='*80}")
-    print(f"📊 シミュレーション結果サマリー")
+    print(f"📊 シミュレーション結果サマリー（全エピソードの平均）")
     print(f"{'='*80}")
     print(f"総エピソード数: {stats['total_episodes']}")
+
+    print(f"\n【エピソード達成率】")
     print(
-        f"安定達成エピソード数: {stats['stable_episodes']} ({stats['stable_rate']*100:.1f}%)"
+        f"安定終了エピソード数: {stats['stable_completion_episodes']} ({stats['stable_completion_rate']*100:.1f}%)"
     )
     print(
-        f"疎外ノード発生エピソード数: {stats['isolated_episodes']} ({stats['isolated_rate']*100:.1f}%)"
+        f"一度でも安定達成: {stats['stability_achieved_episodes']} ({stats['stability_achieved_rate']*100:.1f}%)"
     )
-    print(f"\n平均人間発話数: {stats['avg_human_utterances']:.1f}")
+
+    print(f"\n【安定性指標】")
+    print(f"平均安定率: {stats['avg_stability_rate']*100:.1f}%")
+    print(f"平均疎外発生率: {stats['avg_isolation_occurrence_rate']*100:.1f}%")
+
+    print(f"\n【発話数指標】")
+    print(f"平均人間発話数: {stats['avg_human_utterances']:.1f}")
     print(f"平均ロボット介入回数: {stats['avg_robot_utterances']:.1f}")
 
     if stats["avg_human_utterances_to_stable"] is not None:
-        print(f"\n【安定達成エピソードのみ】")
+        print(f"\n【安定終了エピソードのみ】")
         print(
-            f"  平均人間発話数（安定まで）: {stats['avg_human_utterances_to_stable']:.1f}"
+            f"  平均人間発話数（終了まで）: {stats['avg_human_utterances_to_stable']:.1f}"
         )
         print(
-            f"  平均ロボット介入回数（安定まで）: {stats['avg_robot_utterances_to_stable']:.1f}"
+            f"  平均ロボット介入回数（終了まで）: {stats['avg_robot_utterances_to_stable']:.1f}"
         )
 
-    print(f"\n平均不安定三角形数: {stats['avg_unstable_triads']:.2f}")
+    if stats["avg_first_stable_utterance"] is not None:
+        print(f"  平均初回安定達成: {stats['avg_first_stable_utterance']:.1f}発話")
+
+    print(f"\n【構造指標】")
+    print(f"平均最終不安定三角形数: {stats['avg_final_unstable_triads']:.2f}")
+    print(f"平均切り替わり回数: {stats['avg_oscillation_count']:.1f}")
+    print(f"平均最大連続不安定: {stats['avg_consecutive_unstable_max']:.1f}")
+
+    print(f"\n【関係性スコア】")
+    print(f"平均エッジスコア: {stats['avg_edge_score']:+.2f}")
+    print(f"平均正エッジ割合: {stats['avg_positive_ratio']*100:.1f}%")
+
+    print(f"\n【介入効果】")
+    print(f"介入成功率: {stats['avg_intervention_success_rate']*100:.1f}%")
+    print(f"介入あたり平均改善度: {stats['avg_improvement_per_intervention']:+.3f}")
+    print(f"介入頻度: {stats['avg_intervention_frequency']:.2f}")
+    print(f"1介入あたりの安定評価回数: {stats['avg_stable_rate_per_intervention']:.2f}")
+    print(f"1安定あたりのロボット介入回数: {stats['avg_interventions_per_stable']:.2f}")
+
+    print(f"\n【その他】")
     print(f"平均所要時間: {stats['avg_duration_seconds']:.1f}秒")
 
 
@@ -177,7 +306,7 @@ def main():
         "--output",
         type=str,
         default=None,
-        help="出力ディレクトリ（デフォルト: results/YYYYMMDD_HHMMSS）",
+        help="出力ディレクトリ（デフォルト: results/MMDD_HHMMSS）",
     )
 
     args = parser.parse_args()
@@ -196,7 +325,7 @@ def main():
     if args.output:
         output_dir = args.output
     else:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%m%d_%H%M%S")
         output_dir = f"results/simulation_{timestamp}"
 
     print(f"{'='*80}")
@@ -230,6 +359,9 @@ def main():
 
     # 統計計算
     summary_stats = calculate_statistics(all_stats)
+
+    # エピソードごとの詳細を表示
+    print_episode_details(all_stats)
 
     # サマリー表示
     print_summary(summary_stats)

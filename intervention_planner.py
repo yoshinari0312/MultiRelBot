@@ -21,36 +21,48 @@ class InterventionPlanner:
         triangle_scores: Dict[Tuple[str, str, str], Tuple[str, float]],
         isolation_threshold: float = 0.0,
         mode: str = "proposal",
+        num_participants: int = 3,
     ):
         """
         :param graph: NetworkXグラフ。ノードは人物、エッジは関係性スコア（-1〜1）を持つ
         :param triangle_scores: 三角形ごとの構造タイプ（---, ++- など）とスコア平均
-        :param isolation_threshold: 孤立判定のスコア閾値（これ以下の関係しか持たないと孤立とみなす）
+        :param isolation_threshold: 孤立判定のスコア閾値（これ未満の関係しか持たないと孤立とみなす）
+        :param mode: 介入モード ("proposal", "few_utterances", "random_target")
+        :param num_participants: 参加者数 (3 or 4)
         """
         self.graph = graph
         self.triangle_scores = triangle_scores
         self.theta_iso = isolation_threshold
         self.mode = mode  # "proposal", "few_utterances", "random_target"
+        self.num_participants = num_participants
 
     def detect_structural_isolation(self) -> Optional[str]:
         """
-        Step 1: 完全孤立ノード（すべての隣接スコアがθ_iso未満）を全て列挙し、
-        平均スコアが最も低いノードを返す
+        Step 1: 孤立を検出
+        - ノードの全エッジが theta_iso 以下なら孤立とみなす
+        - 複数の孤立ノードがある場合、最も改善が見込めるノード（負のエッジの絶対値が最小）を選択
         """
         candidates = []
-
-        for node in self.graph.nodes:
+        for node in self.graph.nodes():
             edges = [
                 self.graph[node][nbr]["score"] for nbr in self.graph.neighbors(node)
             ]
+            # 全てのエッジが theta_iso 以下なら孤立候補
             if len(edges) >= 2 and all(edge < self.theta_iso for edge in edges):
-                avg_score = sum(edges) / len(edges)
-                candidates.append((node, avg_score))
+                # 負のエッジから最小絶対値（最も改善しやすい）を見つける
+                negative_edges = [e for e in edges if e < 0]
+                if negative_edges:
+                    min_abs_score = min(abs(e) for e in negative_edges)
+                    candidates.append((node, min_abs_score))
+                else:
+                    # 負のエッジがない場合は平均スコアを使用
+                    avg_score = sum(edges) / len(edges)
+                    candidates.append((node, abs(avg_score)))
 
         if not candidates:
             return None
 
-        # 平均スコアが最も低いノードを返す
+        # 最小絶対値（最も改善が見込める）ノードを返す
         return min(candidates, key=lambda x: x[1])[0]
 
     def sort_triangles(self) -> List[Tuple[str, str, str]]:
@@ -88,11 +100,11 @@ class InterventionPlanner:
                 return tri
         return None
 
-    def choose_target_node(self, triangle: Tuple[str, str, str]) -> str:
+    def choose_target_edge(self, triangle: Tuple[str, str, str]) -> Tuple[str, str]:
         """
-        Step 4: 三角形の構造に応じて、ロボットが話しかけるべき対象ノードを選定
-        - --- 構造：他の2人とのスコア平均が最も高いノードを選ぶ（調停者）
-        - ++-系 構造：2本の+を持つノード（共通の友人）を選ぶ（橋渡し役）
+        Step 4: 三角形の構造に応じて、改善対象エッジを選定
+        - --- 構造：絶対値が最も小さいエッジ（最も改善しやすい弱い対立）
+        - ++-系 構造：負のエッジ（弱い関係）
         """
         a, b, c = triangle
         scores = {
@@ -102,28 +114,27 @@ class InterventionPlanner:
         }
 
         if self.triangle_scores[triangle][0] == "---":
-            avg_scores = {
-                a: (scores[(a, b)] + scores[(c, a)]) / 2,
-                b: (scores[(a, b)] + scores[(b, c)]) / 2,
-                c: (scores[(b, c)] + scores[(c, a)]) / 2,
-            }
-            return max(avg_scores.items(), key=lambda x: x[1])[
-                0
-            ]  # スコア平均が最も高いノードを返す
+            # 絶対値が最小のエッジを選択
+            edges = [
+                ((a, b), abs(scores[(a, b)])),
+                ((b, c), abs(scores[(b, c)])),
+                ((c, a), abs(scores[(c, a)])),
+            ]
+            min_edge = min(edges, key=lambda x: x[1])
+            return min_edge[0]
 
         elif (
             self.triangle_scores[triangle][0] == "++-"
             or self.triangle_scores[triangle][0] == "+-+"
             or self.triangle_scores[triangle][0] == "-++"
         ):
-            counts = {n: 0 for n in triangle}  # エッジが+の数をカウントするための辞書
+            # 負のエッジを返す
             for (u, v), w in scores.items():
-                if w > 0:
-                    counts[u] += 1
-                    counts[v] += 1
-            return max(counts.items(), key=lambda x: x[1])[0]
+                if w < 0:
+                    return (u, v)
 
-        return triangle[0]
+        # フォールバック（通常は到達しない）
+        return (triangle[0], triangle[1])
 
     def plan_intervention(
         self, session_logs: List[Dict[str, Any]]
@@ -132,18 +143,10 @@ class InterventionPlanner:
         介入戦略の全体フローを実行し、介入対象ノードとその構造を返す
         """
 
-        # --- 発話量少ない人に声かけ ---
+        # --- ファシリテーション発話 ---
         if self.mode == "few_utterances" and session_logs:
-            # 各発言者の文字数合計を計算
-            counts = {}
-            for log in session_logs:
-                sp = log["speaker"]
-                counts[sp] = counts.get(sp, 0) + len(log["utterance"])
-            # 発話量をprint
-            print("発話量（文字数）:", counts)
-            target = min(counts, key=counts.get)
-            print(f"🤖 発話量少ない人: {target}さん")
-            return {"type": "few_utterances", "target": target}
+            print(f"🤖 ファシリテーション発話モード")
+            return {"type": "few_utterances"}
 
         # --- ランダム対象に固定フレーズ ---
         if self.mode == "random_target" and session_logs:
@@ -155,31 +158,53 @@ class InterventionPlanner:
         # Step 1: 孤立検出
         isolated = self.detect_structural_isolation()
         if isolated:
-            return {"type": "isolation", "target": isolated}
+            # 孤立ノードの負のエッジから絶対値が最小のものを選択
+            edges = [
+                (isolated, nbr, self.graph[isolated][nbr]["score"])
+                for nbr in self.graph.neighbors(isolated)
+            ]
+            negative_edges = [(n1, n2, score) for n1, n2, score in edges if score < 0]
+            if negative_edges:
+                # 絶対値が最小（改善しやすい）エッジを選択
+                target_edge = min(negative_edges, key=lambda x: abs(x[2]))
+                return {
+                    "type": "isolation",
+                    "target": isolated,
+                    "edge": (target_edge[0], target_edge[1]),
+                }
+            else:
+                # 負のエッジがない場合は、最もスコアが低いエッジを選択
+                target_edge = min(edges, key=lambda x: x[2])
+                return {
+                    "type": "isolation",
+                    "target": isolated,
+                    "edge": (target_edge[0], target_edge[1]),
+                }
 
         # Step 2〜4: 不安定三角形に基づく介入
         triangle = self.select_intervention_triangle()
         if triangle:
-            target_node = self.choose_target_node(triangle)
+            target_edge = self.choose_target_edge(triangle)
             return {
                 "type": "triangle",
                 "structure": self.triangle_scores[triangle][
                     0
                 ],  # 例: '---', '++-', '+-+', '-++'
                 "triangle": triangle,  # 例: ('A', 'B', 'C')
-                "target": target_node,  # 例: 'A'（ロボットが話しかけるべきノード）
+                "edge": target_edge,  # 例: ('A', 'B')（改善対象エッジ）
             }
 
         # Step 5: 安定状態だが弱リンク(0.0～0.2)がある場合 → 関係形成支援介入
-        weak_pairs_scores = []
-        for u, v, data in self.graph.edges(data=True):
-            score = data.get("score", 0.0)
-            if 0.0 <= score <= 0.2:
-                weak_pairs_scores.append(((u, v), score))
-        if weak_pairs_scores:
-            # 最もスコアが小さいペアを1つだけ選択
-            target_pair, _ = min(weak_pairs_scores, key=lambda x: x[1])
-            return {"type": "promotion", "pairs": [target_pair]}
+        # ※ 以下の処理はコメントアウト（孤立または不安定の時のみ介入する仕様に変更）
+        # weak_pairs_scores = []
+        # for u, v, data in self.graph.edges(data=True):
+        #     score = data.get("score", 0.0)
+        #     if 0.0 <= score <= 0.2:
+        #         weak_pairs_scores.append(((u, v), score))
+        # if weak_pairs_scores:
+        #     # 最もスコアが小さいペアを1つだけ選択
+        #     target_pair, _ = min(weak_pairs_scores, key=lambda x: x[1])
+        #     return {"type": "promotion", "pairs": [target_pair]}
 
         return None  # 介入なし
 
@@ -195,122 +220,30 @@ class InterventionPlanner:
         context = "\n".join(
             [f"[{log['speaker']}] {log['utterance']}" for log in session_logs]
         )  # 会話履歴をテキスト化
-        # print(f"🤖 会話履歴:\n{context}\n")
 
-        # 全モード共通で過去発話をチェック
-        history = self.past_utterances
-
-        if plan["type"] == "isolation":
-            print(f"🤖 孤立検出: {plan['target']}さん")
-            name = plan["target"]
+        # ── ファシリテーション発話生成 ──
+        if plan["type"] == "few_utterances":
             full_prompt = f"""
-現在の会話履歴（抜粋）：
+現在の会話履歴：
 {context}
 
 ――――――――――
 
-現在、{name}さんは他の人から距離を置かれており、対立関係にあります。
+あなたは会話をサポートするファシリテーションロボットです。
+上記の会話をもとに、ロボットの適切な発言を1文で考えてください。
 
-あなたは会話をサポートするロボットです。
-過去の会話内容を踏まえて、{name}さんが他の参加者との関係を和らげられるよう、話しかける具体的かつ自然な日本語の一文を考えてください。
-
-- 必ず一文で
-- 発言の中に「{name}さん」と呼びかけ対象の名前を入れる
-- 会話の流れに沿った具体的な内容に
-- 過去の会話を遮って、話題を変えすぎないように
-- 「ロボット：」などの話者ラベルは不要
+【発話に関するルール】
+- 出力はロボットの自然な日本語1文のみ
+- 「ロボット：」などのラベルは不要
+- 説明や理由は述べない
+- 会話の話題を大きく変えず、直前の会話の流れに基づいて自然な一言にする
 """
+            # 過去発話回避をプロンプトに追加
+            if self.past_utterances:
+                full_prompt += "\n\n【注意】過去に以下の発言を行っています。似た内容は繰り返さないようにしてください:\n"
+                for utt in self.past_utterances:
+                    full_prompt += f"- {utt}\n"
 
-        elif plan["type"] == "triangle":
-            a, b, c = plan["triangle"]
-            struct = plan["structure"]
-            target = plan["target"]
-            others = [n for n in (a, b, c) if n != target]
-            other1, other2 = others[0], others[1]
-
-            if struct == "---":
-                print(f"🤖 ---検出: {target}さん（{other1}さん・{other2}さん）")
-                full_prompt = f"""
-現在の会話履歴（抜粋）：
-{context}
-
-――――――――――――――――――――
-
-現在、{target}さんは{other1}さん・{other2}さんとの関係が悪化しています。
-
-あなたは会話をサポートするロボットです。
-過去の会話内容を踏まえて、{target}さんが他の2人のうち、一方と関係を改善するために、{target}さんに話しかける具体的かつ自然な日本語の一文を考えてください。
-
-- 必ず一文で
-- 発言の中に「{target}さん」と呼びかけ対象の名前を入れる
-- 会話の流れに沿った具体的な内容に
-- 過去の会話を遮って、話題を変えすぎないように
-- 「ロボット：」などの話者ラベルは不要
-"""
-
-            elif struct == "++-" or struct == "+-+" or struct == "-++":
-                print(f"🤖 ++-系検出: {target}さん（{other1}さん・{other2}さん）")
-                full_prompt = f"""
-現在の会話履歴（抜粋）：
-{context}
-
-――――――――――
-
-現在、{target}さんは{other1}さん・{other2}さんと良好な関係を築いています。  
-そこで、{target}さんには{other1}さんと{other2}さんの「橋渡し役」として一言話しかけてもらい、  グループ全体の対話をさらに円滑に進めてほしいと考えています。
-
-あなたは会話をサポートするロボットです。  
-過去の会話内容を踏まえて、{target}さんが{other1}さんと{other2}さんの関係を橋渡しするような、  具体的かつ自然な日本語の一文を考えてください。
-
-- 必ず一文で
-- 橋渡しという直接的な内容は避ける
-- 発言の中に「{target}さん」と呼びかけ対象の名前を入れる
-- 会話の流れに沿った具体的な内容に
-- 過去の会話を遮って、話題を変えすぎないように
-- 「ロボット：」などの話者ラベルは不要
-"""
-            else:
-                full_prompt = ""
-
-        elif plan["type"] == "promotion":
-            # 弱リンクを選んで、一文で関係形成支援を促す
-            a, b = plan["pairs"][0]
-            full_prompt = f"""
-現在の会話履歴（抜粋）：
-{context}
-
-――――――――――
-
-現在、{a}さんと{b}さんの関係は中立的で、やや弱いつながりです。
-
-あなたは会話をサポートするロボットです。
-過去の会話内容を踏まえて、{a}さんと{b}さんがより深くつながれるよう、共通点を示したり質問を促したりする具体的かつ自然な日本語の一文を考えてください。
-
-- 必ず一文で
-- 発言の中に「{a}さん」や「{b}さん」と呼びかけ対象の名前を入れる
-- 会話の流れに沿った具体的な内容に
-- 過去の会話を遮って、話題を変えすぎないように
-- 「ロボット：」などの話者ラベルは不要
-"""
-
-        # ── 比較条件の発話生成 ──
-        elif plan["type"] == "few_utterances":
-            # session_logsは渡された時点で最大10発話になってる
-            target = plan["target"]
-            full_prompt = f"""
-現在の会話履歴（抜粋）：
-{context}
-
-――――――――――
-
-会話をもとに、ファシリテーションロボットとして、{target}さんに対するロボットの発言を考えてください。
-
-- 必ず一文で
-- 発言の中に「{target}さん」と呼びかけ対象の名前を入れる
-- 会話の流れに沿った具体的な内容に
-- 「ロボット：」などの話者ラベルは不要
-"""
-            # Azure OpenAIを使用
             client, deployment = get_azure_chat_completion_client(
                 _CFG.llm, model_type="robot"
             )
@@ -320,29 +253,170 @@ class InterventionPlanner:
                 )
 
             messages = [{"role": "user", "content": full_prompt}]
+            # config.yamlから介入用の温度パラメータを読み込み
+            intervention_cfg = getattr(_CFG, "intervention", None)
+            temperature = (
+                getattr(intervention_cfg, "temperature", 1.0)
+                if intervention_cfg
+                else 1.0
+            )
             params = build_chat_completion_params(
-                deployment, messages, _CFG.llm, temperature=1.0
+                deployment, messages, _CFG.llm, temperature=temperature
             )
             res = client.chat.completions.create(**params)
 
-            return (
+            new_utt = (
                 res.choices[0]
                 .message.content.replace("[ロボット]", "")
                 .replace("「", "")
                 .replace("」", "")
                 .strip()
             )
+            self.past_utterances.append(new_utt)
+            print(f"🤖 past_utterances: {self.past_utterances}\n")
+            return new_utt
 
         elif plan["type"] == "random_target":
-            # 固定フレーズ
             return f"{plan['target']}さんはどう思いますか？"
 
-        # --- 既存の full_prompt に過去発話回避ルールを追記 ---
-        if history:
-            print(f"🤖 過去発話回避ルールを適用: {len(history)}件")
-            full_prompt += "\n\n【注意】過去に以下の発言を行っています。似た内容は繰り返さないようにしてください:\n"
-            for utt in history:
-                full_prompt += f"- {utt}\n"
+        # ──────────────────────────────────────
+        # 以下、proposal モード（構造ベース介入）の新プロンプト
+        # ──────────────────────────────────────
+
+        # 【共通 system プロンプト】（参加者数に応じて動的に生成）
+        if self.num_participants == 3:
+            participants_desc = "三者会話（A, B, C）"
+            group_desc = "三者"
+        elif self.num_participants == 4:
+            participants_desc = "四者会話（A, B, C, D）"
+            group_desc = "四者"
+        else:
+            participants_desc = f"{self.num_participants}者会話"
+            group_desc = f"{self.num_participants}者"
+
+        system_prompt = f"""あなたは、{participants_desc}における「関係エッジ」を安定（ポジティブ）にするための
+ロボット発話を、自然で適切な日本語1文で生成する専門AIアシスタントです。
+
+【目的】
+- 会話文脈と現在の関係スコアに基づき、指定された「改善対象エッジ」を
+  より安定的で協力的な関係に近づける発言を生成します。
+- 発言は会話の流れを遮らず、自然に文脈へ溶け込む必要があります。
+
+【発話に関するルール】
+- 出力はロボットの自然な日本語1文のみ。
+- 「ロボット：」などのラベルは不要。
+- 説明や理由は述べない。
+- 相手の名前を必ず入れてください。片方に話す場合は1名、両方に話す場合は2名の名前を入れてください。
+- 会話の話題を大きく変えず、直前の会話の流れに基づいて自然な一言にしてください。
+
+【改善の考え方】
+- 改善対象エッジの2名が、互いに理解・協力・共感しやすくなるよう促す発言を選びます。
+- その際、「どちらに話しかけるか」または「両方に言うか」は、あなたが最も効果的と判断してください。
+  ただし、必ず名前を入れてください。"""
+
+        # 過去発話回避をsystemに統合
+        if self.past_utterances:
+            system_prompt += "\n\n【注意】過去に以下の発言を行っています。似た内容は繰り返さないようにしてください:\n"
+            for utt in self.past_utterances:
+                system_prompt += f"- {utt}\n"
+
+        # 条件別追加ブロック
+        additional_context = ""
+
+        if plan["type"] == "isolation":
+            # 孤立検出の場合
+            node1, node2 = plan["edge"]
+            isolated_node = plan["target"]  # 孤立しているノード
+            other_node = node2 if node1 == isolated_node else node1
+            print(f"🤖 孤立検出: {isolated_node}さん（エッジ: {node1} ⇄ {node2}）")
+            additional_context = f"""
+【追加条件：孤立ノードの改善】
+- 改善対象エッジ：{node1}さん ⇄ {node2}さん
+- {isolated_node}さんは、現在グループ全体から距離を置かれており、孤立している状態です。
+- {isolated_node}さんが{other_node}さんとの関係を再構築しやすくなるような、
+  優しく・具体的で・会話の流れに合った一言を生成してください。
+- 発言対象はあなたが決めて構いません。
+  （{isolated_node}さんに直接話す／{other_node}さんに話す／両方に話すなど最適な方法を選ぶ）
+- ただし、必ず名前を入れてください。"""
+
+        elif plan["type"] == "triangle":
+            node1, node2 = plan["edge"]
+            struct = plan["structure"]
+            triangle = plan["triangle"]  # (A, B, C)
+
+            # 三角形の各エッジのスコアを取得
+            a, b, c = triangle
+            score_ab = self.graph[a][b]["score"]
+            score_bc = self.graph[b][c]["score"]
+            score_ca = self.graph[c][a]["score"]
+
+            # スコアの説明を生成
+            def score_desc(score):
+                if score < -0.5:
+                    return f"{score:.1f}（強い対立）"
+                elif score < 0:
+                    return f"{score:.1f}（対立）"
+                elif score < 0.3:
+                    return f"{score:.1f}（中立・弱い）"
+                elif score < 0.7:
+                    return f"{score:.1f}（良好）"
+                else:
+                    return f"{score:.1f}（強い協力）"
+
+            relationships = f"""- {a}さんと{b}さんの関係: {score_desc(score_ab)}
+- {b}さんと{c}さんの関係: {score_desc(score_bc)}
+- {c}さんと{a}さんの関係: {score_desc(score_ca)}"""
+
+            if struct == "---":
+                print(f"🤖 ---検出: エッジ ({node1}, {node2})")
+                additional_context = f"""
+【追加条件：全員が対立している不安定（---）構造】
+- 三角形の構成員：{a}さん、{b}さん、{c}さん
+- 現在の関係性：
+{relationships}
+- 改善対象エッジ：{node1}さん ⇄ {node2}さん
+- 改善対象エッジは、{group_desc}間の対立の中で「最も関係が修復しやすい弱い対立」に該当します。
+- この2人の関係性をよくすることで、+--の安定三角形を目指したい状況です。
+- あなたは、この2人のどちらに話しかけるか（または2人へまとめて話すか）を、
+  会話文脈に基づいて最も自然で効果的な形で判断してください。
+- ただし、必ず名前を入れてください。
+- 発話内容は、敵対ではなく協力・理解・確認・視点整理につながる、
+  過度に踏み込みすぎない一文にしてください。"""
+
+            elif struct in ("++-", "+-+", "-++"):
+                # 改善対象エッジ以外の人物（良好な関係を持つ人物）を特定
+                third_person = [p for p in triangle if p not in (node1, node2)][0]
+
+                print(f"🤖 ++-系検出: エッジ ({node1}, {node2})")
+                additional_context = f"""
+【追加条件：部分的な不均衡（++-構造）】
+- 三角形の構成員：{a}さん、{b}さん、{c}さん
+- 現在の関係性：
+{relationships}
+- 改善対象エッジ：{node1}さん ⇄ {node2}さん
+- 改善対象エッジは、他の2エッジが良好である一方、この1本だけ弱い関係です。
+- この弱い関係を自然に強めることで、{group_desc}のバランスが良くなります。
+- {third_person}さんは、{node1}さんと{node2}さんの両方と良好な関係を持っています。
+- 誰に話すべきかは固定しません。
+  {third_person}さんを引き合いに出して{node1}さんや{node2}さんに働きかけるか、
+  {node1}さんと{node2}さんの両者に向けた声かけをするかは、あなたが最も効果的と判断する形にして構いません。
+- ただし、必ず名前を入れてください。
+- ただし「橋渡し」「仲介」などの直接的な語は使わず、
+  会話の流れに合った自然な形で方向性を整える一言にしてください。"""
+
+        # userプロンプト（会話履歴）
+        user_prompt = f"""現在の会話履歴：
+{context}
+
+――――――――――
+
+上記の会話を踏まえて、ロボットの発言を1文で生成してください。"""
+
+        # メッセージ構築
+        messages = [
+            {"role": "system", "content": system_prompt + "\n" + additional_context},
+            {"role": "user", "content": user_prompt},
+        ]
 
         # Azure OpenAI を使用
         client, deployment = get_azure_chat_completion_client(
@@ -353,9 +427,13 @@ class InterventionPlanner:
                 "Failed to obtain Azure OpenAI client for robot utterance generation."
             )
 
-        messages = [{"role": "user", "content": full_prompt}]
+        # config.yamlから介入用の温度パラメータを読み込み
+        intervention_cfg = getattr(_CFG, "intervention", None)
+        temperature = (
+            getattr(intervention_cfg, "temperature", 1.0) if intervention_cfg else 1.0
+        )
         params = build_chat_completion_params(
-            deployment, messages, _CFG.llm, temperature=1.0
+            deployment, messages, _CFG.llm, temperature=temperature
         )
         res = client.chat.completions.create(**params)
 
@@ -367,6 +445,5 @@ class InterventionPlanner:
             .strip()
         )
         self.past_utterances.append(new_utt)
-        # past_utterancesを確認
         print(f"🤖 past_utterances: {self.past_utterances}\n")
         return new_utt

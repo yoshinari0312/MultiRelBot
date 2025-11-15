@@ -9,6 +9,7 @@ from typing import List, Dict, Optional
 from dotenv import load_dotenv
 import config
 from azure_clients import get_azure_chat_completion_client, build_chat_completion_params
+from log_filtering import filter_logs_by_human_count
 
 load_dotenv()
 _CFG = config.get_config()
@@ -47,11 +48,8 @@ class HumanLLMSimulator:
         Returns:
             プロンプト文字列
         """
-        # ロボット発話を除外した人間発話のみを取得
-        human_logs = [log for log in logs if log.get("speaker") != "ロボット"]
-
-        # 最新のmax_history個の人間発話を取得
-        filtered_logs = human_logs[-max_history:]
+        # 直近 max_history 個の人間発話 + その間のロボット発話を取得
+        filtered_logs = filter_logs_by_human_count(logs, max_history, exclude_robot=False)
 
         # 会話履歴をテキスト化
         history = "\n".join(
@@ -119,24 +117,11 @@ class HumanLLMSimulator:
                     f"最初は不機嫌で、{other_names}など他の参加者に対して少し不満を含んだ言い方になることがあります。\n"
                 )
 
-        # ロボット発話への反応（直近4人間発話にロボットがいるかチェック）
-        recent_human_logs = [
-            log for log in filtered_logs if log.get("speaker") != "ロボット"
-        ][-4:]
-        recent_human_count = len(recent_human_logs)
-        robot_in_recent_4 = (
-            any(
-                log.get("speaker") == "ロボット"
-                for log in filtered_logs[-recent_human_count:]
-            )
-            if recent_human_count > 0
-            else False
-        )
-
-        if robot_in_recent_4:
-            lines.append("あなたは、相手の発言や態度によって気持ちが変化します。\n")
+            lines.append("あなたの態度（機嫌や協力度）は、他者やロボットの発言内容によって変化します。\n")
             lines.append(
-                "ロボットや他の人の発言に納得したり、認められたりした場合、だんだん機嫌が良くなります。態度が急変することはなく、実在の人のように自然に良くなっていったりします。\n"
+                "他者やロボットから共感・橋渡し・建設的な助言を受けた場合、だんだん機嫌が良くなります。\n"
+                "逆に、的確で納得できる介入を受け取れなかった場合は、だんだん機嫌が悪くなります。\n"
+                "一般的な人間もそうですがいきなり態度を変えるのではなく、徐々に変化します。\n"
             )
 
         lines.extend(

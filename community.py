@@ -13,7 +13,7 @@ import sys
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-plt.rcParams['font.family'] = 'Hiragino Sans'
+plt.rcParams["font.family"] = "Hiragino Sans"
 
 
 # === ログを構造化 ===
@@ -48,10 +48,13 @@ def is_same_topic(history_utterances, current_utterance):
         # model="gpt-4o",
         model="gpt-4.1",
         messages=[
-            {"role": "system", "content": "あなたは会話分析の専門家です。話題の変化に敏感です。"},
-            {"role": "user", "content": prompt}
+            {
+                "role": "system",
+                "content": "あなたは会話分析の専門家です。話題の変化に敏感です。",
+            },
+            {"role": "user", "content": prompt},
         ],
-        temperature=0.0
+        temperature=0.0,
     )
     return "yes" in res.choices[0].message.content.strip().lower()
 
@@ -86,24 +89,26 @@ def split_sessions(logs):
 
 # === GPTに仲の良さを尋ねるプロンプト ===
 def get_gpt_friendship_scores(session_logs, participants):
-    conversation = "\n".join([f"[{log['speaker']}] {log['utterance']}" for log in session_logs])
+    conversation = "\n".join(
+        [f"[{log['speaker']}] {log['utterance']}" for log in session_logs]
+    )
 
     pair = [f"- {a} × {b}" for a, b in combinations(participants, 2)]
     pair_lines = "\n".join(pair)
     output_format = "\n".join([f"{a}-{b}:" for a, b in combinations(participants, 2)])
-#     prompt = f"""
-# 以下の会話を読み、参加者それぞれの「仲の良さ（親密度）」を -1.0 〜 1.0 の間の実数（小数第1位まで）で評価してください。
-# -1.0 は明確な対立、0 は中立、+1.0 は非常に親しい関係を表します。
-# 評価対象は以下のペアです：
+    #     prompt = f"""
+    # 以下の会話を読み、参加者それぞれの「仲の良さ（親密度）」を -1.0 〜 1.0 の間の実数（小数第1位まで）で評価してください。
+    # -1.0 は明確な対立、0 は中立、+1.0 は非常に親しい関係を表します。
+    # 評価対象は以下のペアです：
 
-# {pair_lines}
+    # {pair_lines}
 
-# 会話：
-# {conversation}
+    # 会話：
+    # {conversation}
 
-# 出力形式：
-# {output_format}
-# """
+    # 出力形式：
+    # {output_format}
+    # """
     prompt = f"""
 以下の会話を読み、参加者それぞれの「仲の良さ（親密度）」を -1.0 〜 +1.0 の間の**実数（小数第1位まで）**で評価してください。
 0.0 は特に親しさも対立も感じない「中立的な状態」です。
@@ -125,10 +130,8 @@ def get_gpt_friendship_scores(session_logs, participants):
     res = client.chat.completions.create(
         # model="gpt-4o",
         model="gpt-4.1",
-        messages=[
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.0
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.0,
     )
     return parse_scores_from_response(res.choices[0].message.content)
 
@@ -152,12 +155,15 @@ def parse_scores_from_response(response_text):
 
 # === セッションごとにスコア更新（時間減衰付きEMA） ===
 
+
 def compute_all_relationship_scores(logs, decay_factor=1.5):
     sessions = split_sessions(logs)
     # print(f"\n📎 総セッション数: {len(sessions)}")
 
     relationship_scores = defaultdict(float)
-    interaction_history = defaultdict(lambda: deque(maxlen=3))  # 各ペアの直近3セッション分の発話数
+    interaction_history = defaultdict(
+        lambda: deque(maxlen=3)
+    )  # 各ペアの直近3セッション分の発話数
 
     for idx, session in enumerate(sessions, 1):
         print(f"\n--- セッション {idx} ---")
@@ -186,8 +192,12 @@ def compute_all_relationship_scores(logs, decay_factor=1.5):
         for (a, b), score in gpt_scores.items():
             key = tuple(sorted([a, b]))
             # セッション内での発話回数（ペアのうち少ない方）
-            session_utterance = min(session_utterance_counts[a], session_utterance_counts[b])
-            past_utterances = interaction_history[key]  # 過去の発話数（直近3セッション分）
+            session_utterance = min(
+                session_utterance_counts[a], session_utterance_counts[b]
+            )
+            past_utterances = interaction_history[
+                key
+            ]  # 過去の発話数（直近3セッション分）
             total_past_utterance = sum(past_utterances)  # 過去の発話数の合計
 
             x_t = score  # GPTスコアそのまま使う
@@ -196,8 +206,12 @@ def compute_all_relationship_scores(logs, decay_factor=1.5):
                 relationship_scores[key] = x_t  # 初回は代入
                 # print(f"🆕 初期スコア: {key} = {x_t:.2f}")
             else:
-                ratio = session_utterance / (session_utterance + total_past_utterance)  # 今までの発話数に対するセッション内の発話数の比率
-                alpha = max(0.01, min(1.0, decay_factor * ratio))  # decay_factorを掛けて時間減衰を考慮。しかし、αは0.01以上1.0以下に制限
+                ratio = session_utterance / (
+                    session_utterance + total_past_utterance
+                )  # 今までの発話数に対するセッション内の発話数の比率
+                alpha = max(
+                    0.01, min(1.0, decay_factor * ratio)
+                )  # decay_factorを掛けて時間減衰を考慮。しかし、αは0.01以上1.0以下に制限
                 # print(f"🔢 α計算 ({a}-{b}): min発話数={session_utterance}, 過去合計={total_past_utterance}, α={alpha:.2f}")
                 prev = relationship_scores[key]
                 updated = alpha * x_t + (1 - alpha) * prev
@@ -208,7 +222,7 @@ def compute_all_relationship_scores(logs, decay_factor=1.5):
 
         # print(f"📊 セッション {idx} 終了時の関係スコア（累積）:")
         for (a, b), score in relationship_scores.items():
-            print(f"{a} - {b}: {score:.2f}")
+            print(f"{a} - {b}: {score:.1f}")
 
     return relationship_scores
 
@@ -227,7 +241,9 @@ def compute_unified_scores_per_session(logs):
         cumulative_logs.extend(session)
         print(f"\n--- セッション {idx}（累積履歴でGPT推定） ---")
         for log in cumulative_logs:
-            print(f"[{log['time'].strftime('%H:%M:%S')}] [{log['speaker']}] {log['utterance']}")
+            print(
+                f"[{log['time'].strftime('%H:%M:%S')}] [{log['speaker']}] {log['utterance']}"
+            )
 
         participants = set(log["speaker"] for log in cumulative_logs)
 
